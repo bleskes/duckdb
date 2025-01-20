@@ -34,7 +34,8 @@ public:
 	static ConnectionManager &Get(ClientContext &context);
 
 private:
-	mutable mutex connections_lock;
+	// allow access from the callbacks who are called under the lock
+	mutable std::recursive_mutex connections_lock;
 	reference_map_t<ClientContext, weak_ptr<ClientContext>> connections;
 };
 

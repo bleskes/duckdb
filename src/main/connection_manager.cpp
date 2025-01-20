@@ -9,7 +9,7 @@ ConnectionManager::ConnectionManager() {
 }
 
 void ConnectionManager::AddConnection(ClientContext &context) {
-	lock_guard<mutex> lock(connections_lock);
+	lock_guard<std::recursive_mutex> lock(connections_lock);
 	for (auto &callback : DBConfig::GetConfig(context).extension_callbacks) {
 		callback->OnConnectionOpened(context);
 	}
@@ -17,7 +17,7 @@ void ConnectionManager::AddConnection(ClientContext &context) {
 }
 
 void ConnectionManager::RemoveConnection(ClientContext &context) {
-	lock_guard<mutex> lock(connections_lock);
+	lock_guard<std::recursive_mutex> lock(connections_lock);
 	for (auto &callback : DBConfig::GetConfig(context).extension_callbacks) {
 		callback->OnConnectionClosed(context);
 	}
@@ -25,12 +25,12 @@ void ConnectionManager::RemoveConnection(ClientContext &context) {
 }
 
 idx_t ConnectionManager::GetConnectionCount() const {
-	lock_guard<mutex> lock(connections_lock);
+	lock_guard<std::recursive_mutex> lock(connections_lock);
 	return connections.size();
 }
 
 vector<shared_ptr<ClientContext>> ConnectionManager::GetConnectionList() {
-	lock_guard<mutex> lock(connections_lock);
+	lock_guard<std::recursive_mutex> lock(connections_lock);
 	vector<shared_ptr<ClientContext>> result;
 	for (auto &it : connections) {
 		auto connection = it.second.lock();
