@@ -161,7 +161,7 @@ void SingleFileCheckpointWriter::CreateCheckpoint() {
 	// to replay any concurrent commits that have succeeded and ensure these are not lost
 	auto &transaction_manager = db.GetTransactionManager().Cast<DuckTransactionManager>();
 	ActiveCheckpointWrapper active_checkpoint(transaction_manager);
-	auto has_wal = storage_manager.WALStartCheckpoint(meta_block, options);
+	auto has_wal = storage_manager.WALStartCheckpoint(context, meta_block, options);
 
 	catalog_entry_vector_t catalog_entries;
 	try {
@@ -272,6 +272,7 @@ void SingleFileCheckpointWriter::CreateCheckpoint() {
 			optional_ptr<lock_guard<mutex>> wal_lock;
 			if (!options.wal_lock) {
 				// not holding the WAL lock yet - grab it
+				LockNotifier lock_notifier {context, "SingleFileCheckpointWriter::WALLock"};
 				owned_wal_lock = storage_manager.GetWALLock();
 				wal_lock = *owned_wal_lock;
 			} else {
