@@ -384,7 +384,10 @@ ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Tran
 			// unlock the transaction lock while we are writing to the WAL
 			t_lock.unlock();
 			error = transaction.WriteToWAL(context, db, commit_state);
-			t_lock.lock();
+			{
+				LockNotifier lock_notifier {context, "CommitTransaction::TransactionLock"};
+				t_lock.lock();
+			}
 			skip_wal_write_due_to_checkpoint = false;
 		}
 	}
