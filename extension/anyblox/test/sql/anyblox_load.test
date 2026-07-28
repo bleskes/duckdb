@@ -1,0 +1,31 @@
+# name: extension/anyblox/test/sql/anyblox_load.test
+# description: The anyblox extension registers its function and settings
+# group: [anyblox]
+
+require anyblox
+
+# The table function is registered in the catalog.
+query I
+SELECT count(*) FROM duckdb_functions() WHERE function_name = 'anyblox'
+----
+1
+
+# Its extension settings are registered and default as documented.
+query II
+SELECT name, value FROM duckdb_settings()
+WHERE name IN ('wasm_virtual_memory_limit', 'wasm_cache_limit', 'compile_wasm_with_debug', 'validate_utf8')
+ORDER BY name
+----
+compile_wasm_with_debug	false
+validate_utf8	true
+wasm_cache_limit	268435456
+wasm_virtual_memory_limit	17179869184
+
+statement ok
+SET validate_utf8 = false
+
+# Reading a bundle needs a path.
+statement error
+SELECT * FROM anyblox()
+----
+<REGEX>:.*Binder Error.*

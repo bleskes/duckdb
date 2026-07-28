@@ -1,0 +1,65 @@
+# name: extension/anyblox/test/sql/anyblox.test
+# description: Test the anyblox table function on a self-contained bundle
+# group: [anyblox]
+
+require anyblox
+
+# Decoding needs the AnyBloxCpp runtime linked in, which is optional at build
+# time (see extension/anyblox/CMakeLists.txt). Set ANYBLOX_RUNTIME=1 for builds
+# that have it.
+require-env ANYBLOX_RUNTIME
+
+# Row count matches the bundle metadata / reference CSV (1000 rows).
+query I
+SELECT count(*) FROM anyblox('test/data/taxpayer-sample.any')
+----
+1000
+
+# The schema comes from the bundle metadata.
+query TT
+SELECT column_name, column_type FROM (DESCRIBE SELECT * FROM anyblox('test/data/taxpayer-sample.any'))
+----
+nppes_provider_first_name	VARCHAR
+nppes_provider_last_org_name	VARCHAR
+nppes_provider_state	VARCHAR
+
+# The sample is small enough to decode as a single job, so scan order is stable.
+query TTT
+SELECT * FROM anyblox('test/data/taxpayer-sample.any') LIMIT 5
+----
+SYLVIA	SHOFFNER	NC
+SARAH	HUGHES	NC
+SYLVIA	SHOFFNER	NC
+JOAN	WEBER	NJ
+ERIN	COMBS	OK
+
+# Decoded content equals the reference CSV (order-independent, multiset equality).
+query I
+SELECT
+  (SELECT count(*) FROM (
+     SELECT * FROM anyblox('test/data/taxpayer-sample.any')
+     EXCEPT ALL
+     SELECT * FROM read_csv('test/data/taxpayer-sample.csv', delim='|', header=false, all_varchar=true)))
+  +
+  (SELECT count(*) FROM (
+     SELECT * FROM read_csv('test/data/taxpayer-sample.csv', delim='|', header=false, all_varchar=true)
+     EXCEPT ALL
+     SELECT * FROM anyblox('test/data/taxpayer-sample.any')))
+----
+0
+
+# Projection pushdown: a single projected column still decodes every row, and the
+# values line up with the same column read out of the reference CSV.
+query II
+SELECT count(*), count(DISTINCT nppes_provider_state)
+FROM anyblox('test/data/taxpayer-sample.any')
+----
+1000	36
+
+query I
+SELECT count(*) FROM (
+  SELECT nppes_provider_last_org_name FROM anyblox('test/data/taxpayer-sample.any')
+  EXCEPT ALL
+  SELECT column1 FROM read_csv('test/data/taxpayer-sample.csv', delim='|', header=false, all_varchar=true))
+----
+0
