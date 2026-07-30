@@ -18,6 +18,7 @@ namespace duckdb {
 class ClientContext;
 class DatabaseInstance;
 class ExtensionCallback;
+class FileSkipProvider;
 class OperatorExtension;
 class OptimizerExtension;
 class ParserExtension;
@@ -43,14 +44,17 @@ public:
 	void Register(shared_ptr<OperatorExtension> extension);
 	void Register(const string &name, shared_ptr<StorageExtension> extension);
 	void Register(shared_ptr<ExtensionCallback> extension);
+	void Register(FileSkipProvider provider);
 
 	ExtensionCallbackIteratorHelper<shared_ptr<OperatorExtension>> OperatorExtensions() const;
 	ExtensionCallbackIteratorHelper<OptimizerExtension> OptimizerExtensions() const;
 	ExtensionCallbackIteratorHelper<ParserExtension> ParserExtensions() const;
 	ExtensionCallbackIteratorHelper<PlannerExtension> PlannerExtensions() const;
 	ExtensionCallbackIteratorHelper<shared_ptr<ExtensionCallback>> ExtensionCallbacks() const;
+	ExtensionCallbackIteratorHelper<FileSkipProvider> FileSkipProviders() const;
 	optional_ptr<StorageExtension> FindStorageExtension(const string &name) const;
 	bool HasParserExtensions() const;
+	bool HasFileSkipProviders() const;
 
 private:
 	mutex registry_lock;

@@ -5,6 +5,7 @@
 #include "duckdb/planner/planner_extension.hpp"
 #include "duckdb/storage/storage_extension.hpp"
 #include "duckdb/planner/extension_callback.hpp"
+#include "duckdb/common/multi_file/file_skip_provider.hpp"
 
 namespace duckdb {
 
@@ -21,6 +22,8 @@ struct ExtensionCallbackRegistry {
 	case_insensitive_map_t<shared_ptr<StorageExtension>> storage_extensions;
 	//! Set of callbacks that can be installed by extensions
 	vector<shared_ptr<ExtensionCallback>> extension_callbacks;
+	//! Providers that can decide a whole file is skippable based on the file's own metadata
+	vector<FileSkipProvider> file_skip_providers;
 };
 
 ExtensionCallbackManager &ExtensionCallbackManager::Get(ClientContext &context) {
@@ -82,6 +85,13 @@ void ExtensionCallbackManager::Register(shared_ptr<ExtensionCallback> extension)
 	callback_registry.atomic_store(new_registry);
 }
 
+void ExtensionCallbackManager::Register(FileSkipProvider provider) {
+	lock_guard<mutex> guard(registry_lock);
+	auto new_registry = make_shared_ptr<ExtensionCallbackRegistry>(*callback_registry);
+	new_registry->file_skip_providers.push_back(std::move(provider));
+	callback_registry.atomic_store(new_registry);
+}
+
 template <class T>
 ExtensionCallbackIteratorHelper<T>::ExtensionCallbackIteratorHelper(
     const vector<T> &vec, shared_ptr<ExtensionCallbackRegistry> callback_registry)
@@ -122,6 +132,12 @@ ExtensionCallbackIteratorHelper<shared_ptr<ExtensionCallback>> ExtensionCallback
 	return ExtensionCallbackIteratorHelper<shared_ptr<ExtensionCallback>>(extension_callbacks, std::move(registry));
 }
 
+ExtensionCallbackIteratorHelper<FileSkipProvider> ExtensionCallbackManager::FileSkipProviders() const {
+	auto registry = callback_registry.atomic_load();
+	auto &file_skip_providers = registry->file_skip_providers;
+	return ExtensionCallbackIteratorHelper<FileSkipProvider>(file_skip_providers, std::move(registry));
+}
+
 optional_ptr<StorageExtension> ExtensionCallbackManager::FindStorageExtension(const string &name) const {
 	auto registry = callback_registry.atomic_load();
 	auto entry = registry->storage_extensions.find(name);
@@ -134,6 +150,11 @@ optional_ptr<StorageExtension> ExtensionCallbackManager::FindStorageExtension(co
 bool ExtensionCallbackManager::HasParserExtensions() const {
 	auto registry = callback_registry.atomic_load();
 	return !registry->parser_extensions.empty();
+}
+
+bool ExtensionCallbackManager::HasFileSkipProviders() const {
+	auto registry = callback_registry.atomic_load();
+	return !registry->file_skip_providers.empty();
 }
 
 void OptimizerExtension::Register(DBConfig &config, OptimizerExtension extension) {
@@ -165,6 +186,11 @@ void StorageExtension::Register(DBConfig &config, const string &extension_name,
 	config.GetCallbackManager().Register(extension_name, std::move(extension));
 }
 
+void FileSkipProvider::Register(DBConfig &config, FileSkipProvider provider) {
+	config.GetCallbackManager().Register(std::move(provider));
+}
+
+template class ExtensionCallbackIteratorHelper<FileSkipProvider>;
 template class ExtensionCallbackIteratorHelper<shared_ptr<ExtensionCallback>>;
 template class ExtensionCallbackIteratorHelper<shared_ptr<OperatorExtension>>;
 template class ExtensionCallbackIteratorHelper<OptimizerExtension>;

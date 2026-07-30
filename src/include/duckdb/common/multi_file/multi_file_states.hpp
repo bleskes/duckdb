@@ -154,6 +154,9 @@ struct MultiFileGlobalState : public GlobalTableFunctionState {
 
 	//! Index of file currently up for scanning
 	atomic<idx_t> file_index;
+	//! How many of the files we advanced past were skipped without being scanned, so that profiling can
+	//! report the files actually read rather than the files considered
+	atomic<idx_t> files_skipped {0};
 	//! Index of the lowest file we know we have completely read
 	mutable idx_t completed_file_index = 0;
 	//! The current set of readers

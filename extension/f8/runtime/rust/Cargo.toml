@@ -1,0 +1,22 @@
+[package]
+name = "f8"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "f8"
+crate-type = ["staticlib"]
+
+[dependencies]
+# Only a wasm engine. The filter path needs nothing else: no Arrow, no dataset mapping, no
+# custom memory allocator - which is also why this builds on stable Rust.
+wasmtime = { version = "26", default-features = false, features = [
+    "cranelift",
+    "runtime",
+    "std",
+    "parallel-compilation",
+] }
+
+[profile.release]
+opt-level = 2

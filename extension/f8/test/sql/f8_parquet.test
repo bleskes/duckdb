@@ -1,0 +1,353 @@
+# name: extension/f8/test/sql/f8_parquet.test
+# description: Skipping whole parquet files using a wasm filter module in their KV metadata
+# group: [sql]
+
+require f8
+
+require parquet
+
+# Everything here starts from committed binaries: ordinary parquet files, metadata blobs, and one shared
+# filter module, all produced by the tools (see examples/regenerate-fixtures.sh). The
+# extension never produces these bytes, it only consumes them, so this exercises the read path
+# against input it did not create.
+#
+#   plain_a.parquet   id = 1, 2, 3         metadata_a.bin   column 0 over [1, 3]
+#   plain_b.parquet   id = 101, 102, 103   metadata_b.bin   column 0 over [101, 103]
+#   f8_min_max_module.wasm   the shared module, used by both
+
+statement ok
+SET VARIABLE m = (SELECT content FROM read_blob('test/data/f8_min_max_module.wasm'));
+
+statement ok
+SET VARIABLE sa = (SELECT content FROM read_blob('test/data/metadata_a.bin'));
+
+statement ok
+SET VARIABLE sb = (SELECT content FROM read_blob('test/data/metadata_b.bin'));
+
+# Enhancing a file is a plain COPY: read the ordinary parquet file, write it back with two extra
+# key-value entries. Nothing about the data changes.
+statement ok
+COPY (FROM 'test/data/plain_a.parquet') TO '__TEST_DIR__/a.parquet'
+    (FORMAT parquet, KV_METADATA {f8_module: getvariable('m'), f8_metadata: getvariable('sa')});
+
+statement ok
+COPY (FROM 'test/data/plain_b.parquet') TO '__TEST_DIR__/b.parquet'
+    (FORMAT parquet, KV_METADATA {f8_module: getvariable('m'), f8_metadata: getvariable('sb')});
+
+# The enhanced file holds exactly what the plain one did, in both directions.
+query I
+SELECT count(*) FROM (FROM '__TEST_DIR__/a.parquet' EXCEPT ALL FROM 'test/data/plain_a.parquet')
+----
+0
+
+query I
+SELECT count(*) FROM (FROM 'test/data/plain_a.parquet' EXCEPT ALL FROM '__TEST_DIR__/a.parquet')
+----
+0
+
+query II
+SELECT name, type FROM parquet_schema('__TEST_DIR__/a.parquet') WHERE name IN ('id', 'name') ORDER BY 1
+----
+id	INT64
+name	BYTE_ARRAY
+
+# Two keys, and the module survives the round trip through KV metadata byte for byte.
+query I
+SELECT count(*) FROM parquet_kv_metadata('__TEST_DIR__/a.parquet')
+----
+2
+
+query I
+SELECT value = getvariable('m') FROM parquet_kv_metadata('__TEST_DIR__/a.parquet')
+WHERE key::VARCHAR = 'f8_module'
+----
+true
+
+# Per-file skipping. id = 102 lives only in b, so a is skipped; id = 2 only in a.
+query I
+SELECT count(*) FROM read_parquet(['__TEST_DIR__/a.parquet','__TEST_DIR__/b.parquet']) WHERE id = 102
+----
+1
+
+query I
+SELECT count(*) FROM read_parquet(['__TEST_DIR__/a.parquet','__TEST_DIR__/b.parquet']) WHERE id = 2
+----
+1
+
+# In the gap between the two ranges, and beyond both: every file is skipped.
+query I
+SELECT count(*) FROM read_parquet(['__TEST_DIR__/a.parquet','__TEST_DIR__/b.parquet']) WHERE id = 50
+----
+0
+
+query I
+SELECT count(*) FROM read_parquet(['__TEST_DIR__/a.parquet','__TEST_DIR__/b.parquet']) WHERE id = 999
+----
+0
+
+# Boundaries are inclusive.
+query I
+SELECT count(*) FROM read_parquet(['__TEST_DIR__/a.parquet','__TEST_DIR__/b.parquet'])
+WHERE id IN (1, 3, 101, 103)
+----
+4
+
+# No predicate: nothing to prune.
+query I
+SELECT count(*) FROM read_parquet(['__TEST_DIR__/a.parquet','__TEST_DIR__/b.parquet'])
+----
+6
+
+# The values themselves, not just counts.
+query II
+SELECT id, name FROM read_parquet(['__TEST_DIR__/a.parquet','__TEST_DIR__/b.parquet']) WHERE id = 102
+----
+102	erin
+
+# Skipping must not change any answer. Compare every value against the plain files, with skipping on
+# and off and with union_by_name both ways. union_by_name is called out because the skip bookkeeping
+# in MultiFileInitGlobal advances the scan cursor once per skipped reader, which is only correct
+# while the skipped readers form a prefix.
+statement ok
+CREATE MACRO enhanced(v, ubn) AS (SELECT count(*) FROM read_parquet(['__TEST_DIR__/a.parquet','__TEST_DIR__/b.parquet'], union_by_name=ubn) WHERE id = v);
+
+statement ok
+CREATE MACRO reference(v) AS (SELECT count(*) FROM read_parquet(['test/data/plain_a.parquet','test/data/plain_b.parquet']) WHERE id = v);
+
+statement ok
+CREATE TABLE vals AS SELECT * FROM (VALUES (1),(2),(3),(4),(50),(100),(101),(102),(103),(104),(999),(0),(-1)) v(val);
+
+query I
+SELECT count(*) FROM vals WHERE enhanced(val, false) <> reference(val) OR enhanced(val, true) <> reference(val)
+----
+0
+
+statement ok
+SET f8_enabled = false
+
+query I
+SELECT count(*) FROM vals WHERE enhanced(val, false) <> reference(val) OR enhanced(val, true) <> reference(val)
+----
+0
+
+statement ok
+SET f8_enabled = true
+
+# Proof a skipped file is genuinely never opened: give a's data b's metadata, which claims [101, 103]
+# for a file holding 1, 2, 3. Asking for a row it really contains returns nothing while skipping is
+# on and returns it when off - only possible if the file was not read.
+statement ok
+COPY (FROM 'test/data/plain_a.parquet') TO '__TEST_DIR__/a_lying.parquet'
+    (FORMAT parquet, KV_METADATA {f8_module: getvariable('m'), f8_metadata: getvariable('sb')});
+
+query I
+SELECT count(*) FROM '__TEST_DIR__/a_lying.parquet' WHERE id = 2
+----
+0
+
+statement ok
+SET f8_enabled = false
+
+query I
+SELECT count(*) FROM '__TEST_DIR__/a_lying.parquet' WHERE id = 2
+----
+1
+
+statement ok
+SET f8_enabled = true
+
+# A value the lying metadata does allow: the file is read, and simply has no such row.
+query I
+SELECT count(*) FROM '__TEST_DIR__/a_lying.parquet' WHERE id = 102
+----
+0
+
+# The scan reports the files it actually opened, so a skip is visible in profiling: a.parquet holds
+# 1..3 and is never opened for id = 102.
+query II
+EXPLAIN ANALYZE SELECT count(*) FROM read_parquet(['__TEST_DIR__/a.parquet','__TEST_DIR__/b.parquet']) WHERE id = 102
+----
+analyzed_plan	<REGEX>:[\s\S]*Total Files Read: 1[\s\S]*Files Skipped: 1[\s\S]*
+
+# Nothing to skip: both files are read and neither is counted as skipped.
+query II
+EXPLAIN ANALYZE SELECT count(*) FROM read_parquet(['__TEST_DIR__/a.parquet','__TEST_DIR__/b.parquet'])
+----
+analyzed_plan	<REGEX>:[\s\S]*Total Files Read: 2[\s\S]*
+
+# Files without the keys are untouched, including mixed with enhanced ones in one scan.
+query I
+SELECT count(*) FROM read_parquet(['__TEST_DIR__/a.parquet','test/data/plain_b.parquet']) WHERE id = 102
+----
+1
+
+query I
+SELECT count(*) FROM 'test/data/plain_a.parquet' WHERE id = 999
+----
+0
+
+# Filters this prototype does not understand leave results alone: ranges, IN lists and OR are all
+# "not proven", so the file is read and the engine filters.
+query I
+SELECT count(*) FROM read_parquet(['__TEST_DIR__/a.parquet','__TEST_DIR__/b.parquet']) WHERE id > 100
+----
+3
+
+query I
+SELECT count(*) FROM read_parquet(['__TEST_DIR__/a.parquet','__TEST_DIR__/b.parquet']) WHERE id IN (2, 102)
+----
+2
+
+query I
+SELECT count(*) FROM read_parquet(['__TEST_DIR__/a.parquet','__TEST_DIR__/b.parquet']) WHERE id = 2 OR id = 102
+----
+2
+
+# An AND over the same column still prunes, and stays correct.
+query I
+SELECT count(*) FROM read_parquet(['__TEST_DIR__/a.parquet','__TEST_DIR__/b.parquet']) WHERE id = 2 AND id < 100
+----
+1
+
+# Per-column bounds. two.parquet has a over [1,3] and b over [1001,1003], so a predicate must reach
+# its own column's bounds, and the projection the query uses must not change that.
+statement ok
+SET VARIABLE stwo = (SELECT content FROM read_blob('test/data/metadata_two.bin'));
+
+statement ok
+COPY (FROM 'test/data/plain_two.parquet') TO '__TEST_DIR__/two.parquet'
+    (FORMAT parquet, KV_METADATA {f8_module: getvariable('m'), f8_metadata: getvariable('stwo')});
+
+query IIII
+SELECT
+    (SELECT count(*) FROM '__TEST_DIR__/two.parquet' WHERE a = 2),
+    (SELECT count(*) FROM '__TEST_DIR__/two.parquet' WHERE a = 1002),
+    (SELECT count(*) FROM '__TEST_DIR__/two.parquet' WHERE b = 1002),
+    (SELECT count(*) FROM '__TEST_DIR__/two.parquet' WHERE b = 2)
+----
+1	0	1	0
+
+query II
+SELECT
+    (SELECT count(*) FROM (SELECT b FROM '__TEST_DIR__/two.parquet' WHERE b = 1002)),
+    (SELECT count(*) FROM (SELECT b FROM '__TEST_DIR__/two.parquet' WHERE b = 2))
+----
+1	0
+
+query II
+SELECT
+    (SELECT count(*) FROM '__TEST_DIR__/two.parquet' WHERE a = 2 AND b = 1002),
+    (SELECT count(*) FROM '__TEST_DIR__/two.parquet' WHERE a = 2 AND b = 9999)
+----
+1	0
+
+# The metadata is sparse: wide.csv has a string column that gets no entry at all, and an integer
+# column whose range is far from the others.
+statement ok
+SET VARIABLE swide = (SELECT content FROM read_blob('test/data/metadata_wide.bin'));
+
+statement ok
+COPY (FROM 'test/data/plain_wide.parquet') TO '__TEST_DIR__/wide.parquet'
+    (FORMAT parquet, KV_METADATA {f8_module: getvariable('m'), f8_metadata: getvariable('swide')});
+
+query III
+SELECT
+    (SELECT count(*) FROM '__TEST_DIR__/wide.parquet' WHERE c3 = 5002),
+    (SELECT count(*) FROM '__TEST_DIR__/wide.parquet' WHERE c3 = 1),
+    (SELECT count(*) FROM '__TEST_DIR__/wide.parquet' WHERE c0 = 2)
+----
+1	0	1
+
+# c2 is a string, so it has no entry and can never be skipped - the answer still has to be right.
+query I
+SELECT count(*) FROM '__TEST_DIR__/wide.parquet' WHERE c2 = 'y'
+----
+1
+
+# Broken metadata must never fail a query, only cost a scan.
+statement ok
+COPY (FROM 'test/data/plain_a.parquet') TO '__TEST_DIR__/bad_module.parquet'
+    (FORMAT parquet, KV_METADATA {f8_module: 'not a wasm module'::BLOB, f8_metadata: getvariable('sa')});
+
+query I
+SELECT count(*) FROM '__TEST_DIR__/bad_module.parquet' WHERE id = 2
+----
+1
+
+# Metadataes the module cannot make sense of: truncated, wrong magic, empty, and an inverted range
+# that read naively would make every value look skippable. All must answer correctly.
+foreach metadata metadata_truncated metadata_bad_magic metadata_empty metadata_inverted
+
+statement ok
+SET VARIABLE broken = (SELECT content FROM read_blob('test/data/${metadata}.bin'));
+
+statement ok
+COPY (FROM 'test/data/plain_a.parquet') TO '__TEST_DIR__/broken_${metadata}.parquet'
+    (FORMAT parquet, KV_METADATA {f8_module: getvariable('m'), f8_metadata: getvariable('broken')});
+
+query I
+SELECT count(*) FROM '__TEST_DIR__/broken_${metadata}.parquet' WHERE id = 2
+----
+1
+
+query I
+SELECT count(*) FROM '__TEST_DIR__/broken_${metadata}.parquet' WHERE id = 999
+----
+0
+
+endloop
+
+# The two keys describe one another, so a file carrying only one is malformed. That is reported
+# rather than silently ignored: the file was written meaning to be skippable and is not.
+statement ok
+COPY (FROM 'test/data/plain_a.parquet') TO '__TEST_DIR__/no_module.parquet'
+    (FORMAT parquet, KV_METADATA {f8_metadata: getvariable('sa')});
+
+statement error
+SELECT count(*) FROM '__TEST_DIR__/no_module.parquet' WHERE id = 2
+----
+<REGEX>:.*incomplete f8 metadata.*f8_module.*
+
+statement ok
+COPY (FROM 'test/data/plain_a.parquet') TO '__TEST_DIR__/no_metadata.parquet'
+    (FORMAT parquet, KV_METADATA {f8_module: getvariable('m')});
+
+statement error
+SELECT count(*) FROM '__TEST_DIR__/no_metadata.parquet' WHERE id = 2
+----
+<REGEX>:.*incomplete f8 metadata.*f8_metadata.*
+
+# The check does not depend on there being a filter to evaluate.
+statement error
+SELECT * FROM '__TEST_DIR__/no_module.parquet'
+----
+<REGEX>:.*incomplete f8 metadata.*
+
+# Nor on skipping being enabled - the file is malformed either way.
+statement ok
+SET f8_enabled = false
+
+statement error
+SELECT * FROM '__TEST_DIR__/no_module.parquet'
+----
+<REGEX>:.*incomplete f8 metadata.*
+
+statement ok
+SET f8_enabled = true
+
+# One gap worth recording: a bare count(*) is answered from parquet metadata without initializing a
+# reader, so nothing consults the file's key-value metadata and the malformed file goes unreported.
+query I
+SELECT count(*) FROM '__TEST_DIR__/no_module.parquet'
+----
+3
+
+# Unrelated key-value metadata is not mistaken for ours.
+statement ok
+COPY (FROM 'test/data/plain_a.parquet') TO '__TEST_DIR__/other_kv.parquet'
+    (FORMAT parquet, KV_METADATA {something_else: 'x'});
+
+query I
+SELECT count(*) FROM '__TEST_DIR__/other_kv.parquet' WHERE id = 2
+----
+1

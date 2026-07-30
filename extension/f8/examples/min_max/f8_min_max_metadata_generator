@@ -1,0 +1,135 @@
+#!/usr/bin/env python3
+"""Builds a min/max metadata from a CSV file, for the example min/max filter module.
+
+    f8_min_max_metadata_generator data.csv metadata.bin
+
+This is an example, not a general tool: min/max is one metadata dialect among many, and it lives here
+because it is the dialect f8_min_max_module.c happens to implement. A module using bloom filters or bounding
+boxes would ship its own writer alongside it, and nothing outside this pair would change.
+
+The metadata is the payload of the `f8_metadata` key in a parquet file's key-value metadata. It is a
+sparse map from column index to inclusive bounds, in the layout the example module understands
+(see f8_min_max_module.c):
+
+    0..4    magic "F8S1"
+    4..8    entry count, little endian
+    8..     per entry, 24 bytes: column index u32, reserved u32, min i64, max i64
+
+Only integer columns get an entry. A column with no entry has no bounds and is never skipped, so
+leaving a column out is always safe - it costs a scan, never a wrong answer.
+
+Nothing about this layout is known to DuckDB: it is a contract between whoever writes the metadata
+and whoever wrote the filter module. Replace both and the engine is unaffected.
+
+DuckDB is used to read the CSV rather than python's csv module, on purpose: the metadata is keyed by
+column index and typed as i64, so it has to agree with the schema the parquet writer will produce
+from the same file. Re-inferring types here could disagree and key the metadata to the wrong column,
+which is the one mistake that silently drops rows.
+"""
+import argparse
+import csv
+import io
+import os
+import pathlib
+import shutil
+import struct
+import subprocess
+import sys
+
+MAGIC = b"F8S1"
+
+# Integer types whose full range fits in the i64 that the metadata and the module use.
+METADATAABLE_TYPES = {
+    "TINYINT",
+    "SMALLINT",
+    "INTEGER",
+    "BIGINT",
+    "UTINYINT",
+    "USMALLINT",
+    "UINTEGER",
+}
+
+
+def find_duckdb(explicit):
+    candidate = explicit or os.environ.get("F8_DUCKDB") or shutil.which("duckdb")
+    if not candidate:
+        sys.exit("no duckdb binary found - pass --duckdb, set F8_DUCKDB, or put duckdb on PATH")
+    if not os.access(candidate, os.X_OK):
+        sys.exit(f"{candidate} is not executable")
+    return candidate
+
+
+def run_sql(duckdb, sql):
+    """Runs SQL and returns rows as lists of strings."""
+    result = subprocess.run([duckdb, "-csv", "-noheader", "-c", sql], capture_output=True, text=True)
+    if result.returncode != 0:
+        sys.exit(f"duckdb failed:\n{result.stderr.strip()}")
+    return list(csv.reader(io.StringIO(result.stdout)))
+
+
+def sql_string(value):
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+def sql_identifier(name):
+    return '"' + name.replace('"', '""') + '"'
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Build a min/max metadata from a CSV file.")
+    parser.add_argument("csv", help="input CSV file")
+    parser.add_argument("metadata", help="output metadata file")
+    parser.add_argument("--duckdb", help="duckdb binary to use (default: $F8_DUCKDB or PATH)")
+    args = parser.parse_args()
+
+    csv_path = pathlib.Path(args.csv)
+    if not csv_path.exists():
+        sys.exit(f"{csv_path} not found")
+    duckdb = find_duckdb(args.duckdb)
+    source = f"read_csv({sql_string(csv_path)})"
+
+    # This column order is the order the parquet writer will use, which is what the metadata is
+    # keyed by.
+    schema = [row for row in run_sql(duckdb, f"DESCRIBE SELECT * FROM {source}") if row]
+    if not schema:
+        sys.exit(f"{csv_path} has no columns")
+
+    sketchable = [
+        (index, name)
+        for index, (name, column_type, *_) in enumerate(schema)
+        if column_type in METADATAABLE_TYPES
+    ]
+
+    bounds = []
+    if sketchable:
+        # One query for every bound, so a large CSV is read once.
+        projections = ", ".join(
+            f"min({sql_identifier(name)}), max({sql_identifier(name)})" for _, name in sketchable
+        )
+        bounds = run_sql(duckdb, f"SELECT {projections} FROM {source}")[0]
+
+    entries = bytearray()
+    described = []
+    for position, (column_index, name) in enumerate(sketchable):
+        minimum, maximum = bounds[position * 2], bounds[position * 2 + 1]
+        if minimum == "" or maximum == "":
+            # An all-NULL column has no bounds; leaving it out means "never skip".
+            continue
+        entries += struct.pack("<IIqq", column_index, 0, int(minimum), int(maximum))
+        described.append(f"  column {column_index} ({name}): [{minimum}, {maximum}]")
+
+    entry_count = len(entries) // 24
+    metadata = MAGIC + struct.pack("<I", entry_count) + bytes(entries)
+    pathlib.Path(args.metadata).write_bytes(metadata)
+
+    print(f"wrote {args.metadata}: {len(metadata)} bytes, {entry_count} entry(ies)")
+    for line in described:
+        print(line)
+    sketched_names = {name for _, name in sketchable}
+    unsketched = [name for name, *_ in schema if name not in sketched_names]
+    if unsketched:
+        print(f"  no entry, so never skipped: {', '.join(unsketched)}")
+
+
+if __name__ == "__main__":
+    main()

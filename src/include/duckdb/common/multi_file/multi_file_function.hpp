@@ -13,6 +13,7 @@
 #include "duckdb/function/copy_function.hpp"
 #include "duckdb/common/exception/conversion_exception.hpp"
 #include "duckdb/common/multi_file/multi_file_data.hpp"
+#include "duckdb/common/multi_file/file_skip_provider.hpp"
 #include <numeric>
 
 namespace duckdb {
@@ -258,8 +259,57 @@ public:
 		// 1. The MultiFileReader::Bind call
 		// 2. The 'schema' parquet option
 		auto &global_columns = bind_data.reader_bind.schema.empty() ? bind_data.columns : bind_data.reader_bind.schema;
-		return bind_data.multi_file_reader->InitializeReader(reader_data, bind_data, global_columns, global_column_ids,
-		                                                     table_filters, context, global_state);
+		auto init_result = bind_data.multi_file_reader->InitializeReader(
+		    reader_data, bind_data, global_columns, global_column_ids, table_filters, context, global_state);
+		if (init_result == ReaderInitializeType::SKIP_READING_FILE) {
+			return init_result;
+		}
+		if (AskFileSkipProviders(reader, context)) {
+			return ReaderInitializeType::SKIP_READING_FILE;
+		}
+		return init_result;
+	}
+
+	//! Asks any registered FileSkipProvider whether the file's own metadata rules out every row.
+	//!
+	//! This is how an extension can skip files using metadata that neither the core nor the file
+	//! reader understands - the reader only has to hand over its key-value metadata.
+	static bool AskFileSkipProviders(BaseFileReader &reader, ClientContext &context) {
+		if (!FileSkipProvider::Any(context)) {
+			return false;
+		}
+		case_insensitive_map_t<string> file_metadata;
+		if (!reader.TryGetFileKeyValueMetadata(file_metadata) || file_metadata.empty()) {
+			return false;
+		}
+
+		// Re-key the reader's filters by the file's own column order, so that a provider can index
+		// the file's metadata directly. reader.filters is keyed by position in reader.column_ids,
+		// and reader.column_indexes maps that position to the column's index within the file.
+		map<idx_t, const_reference<TableFilter>> filters;
+		if (reader.filters) {
+			for (auto &entry : reader.filters->filters) {
+				if (entry.first >= reader.column_indexes.size()) {
+					continue;
+				}
+				auto file_column_index = reader.column_indexes[entry.first].GetPrimaryIndex();
+				filters.emplace(file_column_index, const_reference<TableFilter>(*entry.second));
+			}
+		}
+
+		// Providers are consulted even when the query has no filters: there is nothing to prune
+		// then, but a provider can still reject metadata it can see is malformed.
+		for (auto &provider : FileSkipProvider::Iterate(context)) {
+			if (!provider.can_skip_function) {
+				continue;
+			}
+			FileSkipProviderInput input {context, file_metadata, filters, reader.GetFileName(),
+			                             provider.provider_info.get()};
+			if (provider.can_skip_function(input)) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	//! Helper function that try to start opening a next file. Parallel lock should be locked when calling.
@@ -323,6 +373,7 @@ public:
 				parallel_lock.lock();
 				if (can_skip_file) {
 					current_reader_data.file_state = MultiFileFileState::SKIPPED;
+					global_state.files_skipped++;
 					// release the reader so its file handle is closed; skipped files are
 					// never scanned, so nothing else needs the reader
 					current_reader_data.reader = nullptr;
@@ -545,6 +596,7 @@ public:
 					reader_data->file_state = MultiFileFileState::SKIPPED;
 					reader_data->reader = nullptr;
 					result->file_index++;
+					result->files_skipped++;
 				}
 			}
 		}
@@ -859,7 +911,12 @@ public:
 		auto &gstate = input.global_state->Cast<MultiFileGlobalState>();
 		InsertionOrderPreservingMap<string> result;
 		auto files_loaded = gstate.file_index.load();
-		result.insert(make_pair("Total Files Read", std::to_string(files_loaded)));
+		// A skipped file was never opened, so counting it as read would hide the point of skipping.
+		auto files_skipped = MinValue(gstate.files_skipped.load(), files_loaded);
+		result.insert(make_pair("Total Files Read", std::to_string(files_loaded - files_skipped)));
+		if (files_skipped > 0) {
+			result.insert(make_pair("Files Skipped", std::to_string(files_skipped)));
+		}
 
 		constexpr size_t FILE_NAME_LIST_LIMIT = 5;
 		auto file_paths = gstate.file_list.GetDisplayFileList(FILE_NAME_LIST_LIMIT + 1);

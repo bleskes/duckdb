@@ -64,6 +64,11 @@ public:
 		//! Whether or not to push casts into the cast map
 		return false;
 	}
+	//! Reads the file's own key-value metadata, if the format has any. Returns false when the format has no
+	//! such concept, so that callers can tell "no metadata" apart from "not supported".
+	virtual bool TryGetFileKeyValueMetadata(case_insensitive_map_t<string> &result) const {
+		return false;
+	}
 	//! Adds a virtual column to be projected at the end
 	virtual void AddVirtualColumn(column_t virtual_column_id) {
 		throw InternalException("Reader %s does not support AddVirtualColumn", GetReaderType());

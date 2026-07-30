@@ -1,0 +1,112 @@
+#!/usr/bin/env bash
+# Compiles a freestanding C filter module to wasm.
+#
+#     build_f8_module source.c output.wasm
+#
+# Generic: it knows nothing about any particular metadata dialect, only how to produce a wasm module
+# with no imports. The bundled example is examples/min_max/f8_min_max_module.c.
+#
+# C is only what the example happens to use. The ABI is three exported functions and an exported
+# memory with no imports, so C++, Zig, Rust and hand-written WAT work too - see README.md.
+#
+# Needs a clang with the wasm32 target plus a wasm-ld. Those often come from different places: Apple
+# clang has no wasm32 backend at all, Homebrew's llvm has the backend but ships no wasm-ld, and
+# wasi-sdk or an emsdk checkout has both. This script therefore looks for a workable pair rather
+# than assuming `clang` can do it.
+set -euo pipefail
+
+if [[ $# -lt 2 ]]; then
+    echo "usage: build_f8_module source.c output.wasm" >&2
+    exit 2
+fi
+source_file="$1"
+output="$2"
+[[ -f "$source_file" ]] || { echo "$source_file not found" >&2; exit 1; }
+
+find_clang() {
+    if [[ -n "${F8_CLANG:-}" ]]; then echo "$F8_CLANG"; return; fi
+    local candidates=(
+        "${WASI_SDK_PATH:-/opt/wasi-sdk}/bin/clang"
+        /opt/homebrew/opt/llvm/bin/clang
+        /usr/local/opt/llvm/bin/clang
+        "$(command -v clang || true)"
+    )
+    for candidate in "${candidates[@]}"; do
+        [[ -x "$candidate" ]] || continue
+        # Only useful if the WebAssembly backend was compiled in.
+        if "$candidate" --print-targets 2>/dev/null | grep -q 'wasm32'; then
+            echo "$candidate"
+            return
+        fi
+    done
+    echo ""
+}
+
+find_wasm_ld_dir() {
+    if [[ -n "${F8_WASM_LD:-}" ]]; then dirname "$F8_WASM_LD"; return; fi
+    local candidates=(
+        "${WASI_SDK_PATH:-/opt/wasi-sdk}/bin/wasm-ld"
+        /opt/homebrew/opt/llvm/bin/wasm-ld
+        /usr/local/opt/llvm/bin/wasm-ld
+        "$(command -v wasm-ld || true)"
+        "$HOME/src/md/emsdk/upstream/bin/wasm-ld"
+    )
+    # An emsdk checkout is a common way to have wasm-ld without wasi-sdk.
+    if [[ -n "${EMSDK:-}" ]]; then candidates+=("$EMSDK/upstream/bin/wasm-ld"); fi
+    for candidate in "${candidates[@]}"; do
+        [[ -x "$candidate" ]] && { dirname "$candidate"; return; }
+    done
+    echo ""
+}
+
+clang_bin="$(find_clang)"
+if [[ -z "$clang_bin" ]]; then
+    cat >&2 <<'MSG'
+no clang with a wasm32 target found.
+
+Apple's clang cannot target wasm. Install one that can, then re-run:
+    brew install llvm            # has the backend, but see below about wasm-ld
+    or install wasi-sdk and set WASI_SDK_PATH
+Override directly with F8_CLANG=/path/to/clang.
+
+The committed module in test/data is already built, so this is only needed to change it.
+MSG
+    exit 1
+fi
+
+wasm_ld_dir="$(find_wasm_ld_dir)"
+if [[ -z "$wasm_ld_dir" ]]; then
+    cat >&2 <<MSG
+found a wasm-capable clang ($clang_bin) but no wasm-ld to link with.
+
+Homebrew's llvm ships the wasm32 backend without wasm-ld. Options:
+    install wasi-sdk and set WASI_SDK_PATH
+    or point at an existing one: F8_WASM_LD=/path/to/wasm-ld
+MSG
+    exit 1
+fi
+
+echo "using $clang_bin"
+echo "  with wasm-ld from $wasm_ld_dir"
+
+mkdir -p "$(dirname "$output")"
+# --no-entry: a filter module has no main.
+# --export-memory: the host writes the metadata into linear memory, so it must be reachable.
+# -nostdlib: no libc, hence no imports, hence nothing for the host to supply.
+# Exports come from __attribute__((export_name)) in the source, so the export list stays next to the
+# functions rather than living in this script.
+PATH="$wasm_ld_dir:$PATH" "$clang_bin" \
+    --target=wasm32 \
+    -nostdlib \
+    -O2 \
+    -Wall -Wextra \
+    -Wl,--no-entry \
+    -Wl,--export-memory \
+    -o "$output" \
+    "$source_file"
+
+echo "wrote $output: $(wc -c < "$output" | tr -d ' ') bytes"
+
+# The host looks these up by name; a module missing any of them cannot be used.
+echo "exports:"
+strings -n 6 "$output" | grep '^f8_' | sort | sed 's/^/  /'

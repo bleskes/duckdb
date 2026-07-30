@@ -1,0 +1,7 @@
+# Cargo output. The CMake build sends the runtime's output to the build directory via
+# CARGO_TARGET_DIR, but building either crate by hand still lands here.
+target/
+
+# The repo root ignores *.bin, but the metadata fixtures are committed deliberately: the tests read
+# bytes the extension did not produce, which is the whole point of them.
+!test/data/*.bin

@@ -1,0 +1,82 @@
+#!/usr/bin/env python3
+"""Writes a parquet file from a CSV, optionally embedding an f8 filter module and metadata.
+
+    embed_f8_in_parquet data.csv plain.parquet
+    embed_f8_in_parquet data.csv enhanced.parquet --module f8_min_max_module.wasm --metadata metadata.bin
+
+With --module and --metadata the two blobs are stored in the parquet file's key-value metadata under
+`f8_module` and `f8_metadata`. Both must be given together or neither: a file carrying only one of
+them is malformed, and a reader that understands f8 will say so.
+
+Note this needs no f8 extension, only a stock duckdb: `read_blob`, `getvariable` and the parquet
+writer's KV_METADATA option are all core features. Producing f8 files is therefore something any
+DuckDB - or any parquet writer that can set key-value metadata - can do. Only *skipping* on them
+needs the extension.
+"""
+import argparse
+import os
+import pathlib
+import shutil
+import subprocess
+import sys
+
+
+def find_duckdb(explicit):
+    candidate = explicit or os.environ.get("F8_DUCKDB") or shutil.which("duckdb")
+    if not candidate:
+        sys.exit("no duckdb binary found - pass --duckdb, set F8_DUCKDB, or put duckdb on PATH")
+    if not os.access(candidate, os.X_OK):
+        sys.exit(f"{candidate} is not executable")
+    return candidate
+
+
+def sql_string(value):
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Write a parquet file from a CSV, optionally with an f8 module and metadata."
+    )
+    parser.add_argument("csv", help="input CSV file")
+    parser.add_argument("parquet", help="output parquet file")
+    parser.add_argument("--module", help="wasm filter module to embed")
+    parser.add_argument("--metadata", help="metadata to embed")
+    parser.add_argument("--duckdb", help="duckdb binary to use (default: $F8_DUCKDB or PATH)")
+    args = parser.parse_args()
+
+    if bool(args.module) != bool(args.metadata):
+        sys.exit("--module and --metadata must be given together, or neither")
+    for path in filter(None, [args.csv, args.module, args.metadata]):
+        if not pathlib.Path(path).exists():
+            sys.exit(f"{path} not found")
+
+    duckdb = find_duckdb(args.duckdb)
+    source = f"read_csv({sql_string(args.csv)})"
+
+    if args.module:
+        # SET VARIABLE accepts a scalar subquery, and getvariable() is a foldable scalar, which is
+        # what KV_METADATA needs. read_blob is a table function and so cannot be used there
+        # directly.
+        statements = [
+            f"SET VARIABLE f8_module = (SELECT content FROM read_blob({sql_string(args.module)}))",
+            f"SET VARIABLE f8_metadata = (SELECT content FROM read_blob({sql_string(args.metadata)}))",
+            f"COPY (FROM {source}) TO {sql_string(args.parquet)} (FORMAT parquet, KV_METADATA "
+            "{f8_module: getvariable('f8_module'), f8_metadata: getvariable('f8_metadata')})",
+        ]
+    else:
+        statements = [f"COPY (FROM {source}) TO {sql_string(args.parquet)} (FORMAT parquet)"]
+
+    result = subprocess.run(
+        [duckdb, "-c", ";\n".join(statements)], capture_output=True, text=True
+    )
+    if result.returncode != 0:
+        sys.exit(f"duckdb failed:\n{result.stderr.strip()}")
+
+    size = pathlib.Path(args.parquet).stat().st_size
+    embedded = " with f8 module and metadata" if args.module else ""
+    print(f"wrote {args.parquet}: {size} bytes{embedded}")
+
+
+if __name__ == "__main__":
+    main()

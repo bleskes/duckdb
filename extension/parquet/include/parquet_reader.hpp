@@ -178,6 +178,9 @@ public:
 	                 LocalTableFunctionState &local_state, DataChunk &chunk) override;
 	void FinishFile(ClientContext &context, GlobalTableFunctionState &gstate_p) override;
 	double GetProgressInFile(ClientContext &context) override;
+	//! The parquet key-value metadata is parsed as part of the footer, so it is available before any
+	//! column data is read.
+	bool TryGetFileKeyValueMetadata(case_insensitive_map_t<string> &result) const override;
 
 public:
 	void InitializeScan(ClientContext &context, ParquetReaderScanState &state, vector<idx_t> groups_to_read) const;

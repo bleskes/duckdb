@@ -960,6 +960,14 @@ const FileMetaData *ParquetReader::GetFileMetadata() const {
 	return metadata->metadata.get();
 }
 
+bool ParquetReader::TryGetFileKeyValueMetadata(case_insensitive_map_t<string> &result) const {
+	for (auto &entry : GetFileMetadata()->key_value_metadata) {
+		// Duplicate keys are legal in the thrift schema; the first one wins, as elsewhere.
+		result.emplace(entry.key, entry.value);
+	}
+	return true;
+}
+
 static unique_ptr<BaseStatistics> ReadStatisticsInternal(const FileMetaData &file_meta_data,
                                                          const ParquetColumnSchema &root_schema,
                                                          const ParquetOptions &parquet_options,

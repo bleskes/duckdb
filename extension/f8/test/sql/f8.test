@@ -1,0 +1,103 @@
+# name: extension/f8/test/sql/f8.test
+# description: Running a wasm filter module to decide whether a file can be skipped
+# group: [sql]
+
+require f8
+
+# Paths are relative to the extension directory, which is the working directory
+# sqllogictest uses for extension tests.
+statement ok
+CREATE MACRO can_skip(col, val) AS f8_can_skip_equal(
+    (SELECT content FROM read_blob('test/data/f8_min_max_module.wasm')),
+    (SELECT content FROM read_blob('test/data/metadata_3col.bin')), col, val);
+
+# The metadata is a sparse map: it has entries for column 0 over [100, 200] and column 1 over
+# [-5, 5]. Column 2 has no entry, which is how "no bounds" is expressed.
+
+# Outside the bounds: the module proves no row can match, so the file can be skipped.
+query III
+SELECT can_skip(0, 42), can_skip(0, 1000), can_skip(0, -1)
+----
+true	true	true
+
+# Inside the bounds, including both endpoints: nothing is proven, so the file must be read.
+query III
+SELECT can_skip(0, 150), can_skip(0, 100), can_skip(0, 200)
+----
+false	false	false
+
+# Bounds are per column.
+query IIII
+SELECT can_skip(1, 0), can_skip(1, -5), can_skip(1, -6), can_skip(1, 6)
+----
+false	false	true	true
+
+# A column with no entry is never skipped.
+query I
+SELECT can_skip(2, 999999)
+----
+false
+
+# Neither is a column beyond the end of the metadata.
+query I
+SELECT can_skip(3, 42)
+----
+false
+
+# Extremes must not wrap around.
+query II
+SELECT can_skip(0, 9223372036854775807), can_skip(0, -9223372036854775808)
+----
+true	true
+
+# A malformed metadata degrades to "must read" rather than skipping something it should not.
+# An inverted range is the dangerous case: read naively it would make every value skippable.
+query IIII
+SELECT
+  f8_can_skip_equal(w.content, s.content, 0, 42),
+  f8_can_skip_equal(w.content, b.content, 0, 42),
+  f8_can_skip_equal(w.content, t.content, 0, 42),
+  f8_can_skip_equal(w.content, e.content, 0, 42)
+FROM read_blob('test/data/f8_min_max_module.wasm') w,
+     read_blob('test/data/metadata_inverted.bin') s,
+     read_blob('test/data/metadata_bad_magic.bin') b,
+     read_blob('test/data/metadata_truncated.bin') t,
+     read_blob('test/data/metadata_empty.bin') e
+----
+false	false	false	false
+
+# NULL in, NULL out.
+query IIII
+SELECT
+  f8_can_skip_equal(NULL, s.content, 0, 42),
+  f8_can_skip_equal(w.content, NULL, 0, 42),
+  f8_can_skip_equal(w.content, s.content, NULL, 42),
+  f8_can_skip_equal(w.content, s.content, 0, NULL)
+FROM read_blob('test/data/f8_min_max_module.wasm') w, read_blob('test/data/metadata_3col.bin') s
+----
+NULL	NULL	NULL	NULL
+
+# A module that is not wasm at all must produce an error, not take the process down. This is
+# the regression guard for running untrusted code out of a data file.
+statement error
+SELECT f8_can_skip_equal('this is not a wasm module'::BLOB, s.content, 0, 42)
+FROM read_blob('test/data/metadata_3col.bin') s
+----
+<REGEX>:.*f8_can_skip_equal.*
+
+# Truncating a real module is the more realistic corruption, and must also be an error.
+statement error
+SELECT f8_can_skip_equal(w.content[1:100]::BLOB, s.content, 0, 42)
+FROM read_blob('test/data/f8_min_max_module.wasm') w, read_blob('test/data/metadata_3col.bin') s
+----
+<REGEX>:.*f8_can_skip_equal.*
+
+# Valid wasm that does not export the filter ABI is an error too, not a silent "must read".
+statement error
+SELECT f8_can_skip_equal(unhex('0061736d01000000')::BLOB, s.content, 0, 42)
+FROM read_blob('test/data/metadata_3col.bin') s
+----
+<REGEX>:.*f8_can_skip_equal.*
+
+statement ok
+DROP MACRO can_skip
