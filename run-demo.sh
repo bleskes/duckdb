@@ -38,9 +38,10 @@ $examples/min_maxtrix/f8_min_maxtrix_metadata_generator $examples/a.csv "$work/a
 $examples/min_maxtrix/f8_min_maxtrix_metadata_generator $examples/b.csv "$work/b.bin"
 
 echo
-echo "== 3. write parquet: a.parquet as usual, then one file per module with the blobs attached =="
+echo "== 3. write parquet: both CSVs as usual, then again with the blobs attached =="
 echo "   the tool takes any vanilla duckdb (\$F8_DUCKDB or PATH) - writing needs no f8"
 $tools/embed_f8_in_parquet $examples/a.csv "$work/a.parquet"
+$tools/embed_f8_in_parquet $examples/b.csv "$work/b.parquet"
 $tools/embed_f8_in_parquet $examples/a.csv "$work/a_min_maxtrix_f8.parquet" \
     --module "$work/f8_min_maxtrix_module.wasm" --metadata "$work/a.bin"
 $tools/embed_f8_in_parquet $examples/b.csv "$work/b_min_maxtrix_f8.parquet" \
@@ -48,6 +49,8 @@ $tools/embed_f8_in_parquet $examples/b.csv "$work/b_min_maxtrix_f8.parquet" \
 # The same data and the same metadata, read by the module that knows only about bounds.
 $tools/embed_f8_in_parquet $examples/a.csv "$work/a_min_max_f8.parquet" \
     --module "$work/f8_min_max_module.wasm" --metadata "$work/a.bin"
+$tools/embed_f8_in_parquet $examples/b.csv "$work/b_min_max_f8.parquet" \
+    --module "$work/f8_min_max_module.wasm" --metadata "$work/b.bin"
 
 # -echo prints each statement before running it, and one -c per statement keeps that honest: with
 # several statements in a single -c the CLI echoes the first one again for each of them. All the -c of
@@ -55,17 +58,20 @@ $tools/embed_f8_in_parquet $examples/a.csv "$work/a_min_max_f8.parquet" \
 both="read_parquet(['$work/a_min_maxtrix_f8.parquet','$work/b_min_maxtrix_f8.parquet'])"
 # Computed here rather than inline in the SQL, so the echoed statement shows one number.
 extra_bytes=$(( $(wc -c < "$work/a_min_maxtrix_f8.parquet") - $(wc -c < "$work/a.parquet") ))
+plain_bytes=$(( $(wc -c < "$work/a.parquet") ))
 
 echo
 echo "== 4. an f8 file is still an ordinary parquet file =="
 echo "   f8_enabled = false stands in for a reader that has never heard of f8"
+echo "   the two blobs add slightly more than their own size: parquet frames each key and value"
 $duckdb -echo \
     -c "SET f8_enabled = false" \
-    -c "SELECT 'rows in a_min_maxtrix_f8.parquet' AS check, count(*) AS value FROM '$work/a_min_maxtrix_f8.parquet'
+    -c "SELECT 'rows in a_min_maxtrix_f8.parquet' AS what, count(*) AS value FROM '$work/a_min_maxtrix_f8.parquet'
 UNION ALL SELECT 'rows in a.parquet', count(*) FROM '$work/a.parquet'
-UNION ALL SELECT 'extra bytes for module+metadata', $extra_bytes" \
-    -c "SELECT key::VARCHAR AS kv_key, octet_length(value) AS bytes
-FROM parquet_kv_metadata('$work/a_min_maxtrix_f8.parquet') ORDER BY 1"
+UNION ALL SELECT 'bytes of ' || key::VARCHAR, octet_length(value)
+    FROM parquet_kv_metadata('$work/a_min_maxtrix_f8.parquet')
+UNION ALL SELECT 'bytes of plain a.parquet', $plain_bytes
+UNION ALL SELECT 'bytes the two blobs add', $extra_bytes"
 
 echo "== 5. querying both f8 files: id lives only in b, so the a file is skipped =="
 $duckdb -echo \
