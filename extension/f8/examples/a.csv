@@ -1,4 +1,4 @@
-id,name
-1,alice
-2,bob
-3,carol
+id,name,cash
+1,alice,10
+2,bob,50
+3,carol,90

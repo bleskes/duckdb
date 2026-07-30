@@ -26,6 +26,7 @@ use wasmtime::{Config, Engine, Instance, Module, Store, TypedFunc};
 const EXPORT_METADATA_BUFFER: &str = "f8_metadata_buffer";
 const EXPORT_METADATA_CAPACITY: &str = "f8_metadata_capacity";
 const EXPORT_CAN_SKIP_EQUAL_I64: &str = "f8_can_skip_equal_i64";
+const EXPORT_CONJ_I64: &str = "f8_conj_i64";
 
 /// The module's answer.
 const GUEST_CAN_SKIP: u32 = 1;
@@ -33,6 +34,10 @@ const GUEST_CAN_SKIP: u32 = 1;
 /// Bounds how long a module may run. A predicate over metadata is a handful of loads and
 /// compares; anything approaching this is a module that is misbehaving.
 const FUEL_PER_CALL: u64 = 10_000_000;
+
+/// What a term compares with. Mirrored in f8_ffi.h and in every filter module.
+pub const SKIP_TYPE_NONE: u32 = 0;
+pub const SKIP_TYPE_EQUAL: u32 = 1;
 
 /// Returned to C.
 pub const RESULT_MUST_READ: i32 = 0;
@@ -72,13 +77,17 @@ impl F8Runtime {
         Ok(module)
     }
 
-    fn can_skip_equal_i64(
+    /// Instantiates the module, hands it the metadata, and lets `ask` call whichever entry point it wants.
+    /// Every call gets a fresh store, so one file's answer cannot depend on another's.
+    fn with_metadata<F>(
         &self,
         wasm: &[u8],
         metadata: &[u8],
-        column_index: u32,
-        value: i64,
-    ) -> Result<bool, wasmtime::Error> {
+        ask: F,
+    ) -> Result<bool, wasmtime::Error>
+    where
+        F: FnOnce(&mut Store<()>, &Instance) -> Result<u32, wasmtime::Error>,
+    {
         let module = self.module(wasm)?;
         let mut store = Store::new(&self.engine, ());
         store.set_fuel(FUEL_PER_CALL)?;
@@ -89,8 +98,6 @@ impl F8Runtime {
             instance.get_typed_func(&mut store, EXPORT_METADATA_BUFFER)?;
         let metadata_capacity: TypedFunc<(), u32> =
             instance.get_typed_func(&mut store, EXPORT_METADATA_CAPACITY)?;
-        let can_skip: TypedFunc<(u32, u32, i64), u32> =
-            instance.get_typed_func(&mut store, EXPORT_CAN_SKIP_EQUAL_I64)?;
 
         let capacity = metadata_capacity.call(&mut store, ())? as usize;
         if metadata.len() > capacity {
@@ -103,8 +110,43 @@ impl F8Runtime {
             .ok_or_else(|| wasmtime::Error::msg("filter module does not export its memory"))?;
         memory.write(&mut store, offset, metadata)?;
 
-        let answer = can_skip.call(&mut store, (column_index, metadata.len() as u32, value))?;
-        Ok(answer == GUEST_CAN_SKIP)
+        Ok(ask(&mut store, &instance)? == GUEST_CAN_SKIP)
+    }
+
+    /// The direct line for a lone equality: three arguments, no skip type to dispatch on.
+    fn can_skip_equal_i64(
+        &self,
+        wasm: &[u8],
+        metadata: &[u8],
+        column_index: u32,
+        value: i64,
+    ) -> Result<bool, wasmtime::Error> {
+        let metadata_len = metadata.len() as u32;
+        self.with_metadata(wasm, metadata, |store, instance| {
+            let can_skip: TypedFunc<(u32, u32, i64), u32> =
+                instance.get_typed_func(&mut *store, EXPORT_CAN_SKIP_EQUAL_I64)?;
+            can_skip.call(store, (column_index, metadata_len, value))
+        })
+    }
+
+    /// Two terms that must both hold, in one call, so a module can answer from metadata that only means
+    /// something jointly.
+    fn conj_i64(
+        &self,
+        wasm: &[u8],
+        metadata: &[u8],
+        lhs: (u32, u32, i64),
+        rhs: (u32, u32, i64),
+    ) -> Result<bool, wasmtime::Error> {
+        let metadata_len = metadata.len() as u32;
+        self.with_metadata(wasm, metadata, |store, instance| {
+            let conj: TypedFunc<(u32, u32, u32, i64, u32, u32, i64), u32> =
+                instance.get_typed_func(&mut *store, EXPORT_CONJ_I64)?;
+            conj.call(
+                store,
+                (metadata_len, lhs.0, lhs.1, lhs.2, rhs.0, rhs.1, rhs.2),
+            )
+        })
     }
 }
 
@@ -159,7 +201,7 @@ pub unsafe extern "C" fn f8_runtime_drop(runtime: *mut F8Runtime) {
     }
 }
 
-/// Frees a message produced by [`f8_can_skip_equal_i64`].
+/// Frees a message produced by either of the can-skip calls.
 #[no_mangle]
 pub unsafe extern "C" fn f8_error_drop(error: *mut c_char) {
     if !error.is_null() {
@@ -171,8 +213,8 @@ pub unsafe extern "C" fn f8_error_drop(error: *mut c_char) {
 /// Asks the module whether `value` can match no row of `column_index`.
 ///
 /// Returns [`RESULT_CAN_SKIP`], [`RESULT_MUST_READ`], or [`RESULT_ERROR`] with a message in
-/// `error_out` that the caller frees with [`f8_error_drop`]. Only `RESULT_CAN_SKIP`
-/// permits skipping the file.
+/// `error_out` that the caller frees with [`f8_error_drop`]. Only `RESULT_CAN_SKIP` permits
+/// skipping the file.
 ///
 /// # Safety
 ///
@@ -200,4 +242,54 @@ pub unsafe extern "C" fn f8_can_skip_equal_i64(
         if metadata_len == 0 { &[][..] } else { std::slice::from_raw_parts(metadata, metadata_len) };
 
     guard(error_out, || runtime.can_skip_equal_i64(wasm, metadata, column_index, value))
+}
+
+/// Asks the module whether two terms that must both hold can match no row together.
+///
+/// `*_skip_type` says what each term compares with: [`SKIP_TYPE_NONE`] for "there is no term on this
+/// side", [`SKIP_TYPE_EQUAL`] for equality. A module answers "no information" for a type it does not
+/// know. A lone equality has its own entry point, [`f8_can_skip_equal_i64`].
+///
+/// Returns [`RESULT_CAN_SKIP`], [`RESULT_MUST_READ`], or [`RESULT_ERROR`] with a message in
+/// `error_out` that the caller frees with [`f8_error_drop`]. Only `RESULT_CAN_SKIP` permits
+/// skipping the file.
+///
+/// # Safety
+///
+/// `wasm` and `metadata` must point to at least their stated lengths, or be null when empty.
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn f8_can_skip_conj_i64(
+    runtime: *mut F8Runtime,
+    wasm: *const u8,
+    wasm_len: usize,
+    metadata: *const u8,
+    metadata_len: usize,
+    lhs_skip_type: u32,
+    lhs_column_index: u32,
+    lhs_value: i64,
+    rhs_skip_type: u32,
+    rhs_column_index: u32,
+    rhs_value: i64,
+    error_out: *mut *mut c_char,
+) -> i32 {
+    if runtime.is_null() || (wasm.is_null() && wasm_len != 0) || (metadata.is_null() && metadata_len != 0)
+    {
+        return guard(error_out, || {
+            Err(wasmtime::Error::msg("null argument passed to f8_can_skip_conj_i64"))
+        });
+    }
+    let runtime = &*runtime;
+    let wasm = if wasm_len == 0 { &[][..] } else { std::slice::from_raw_parts(wasm, wasm_len) };
+    let metadata =
+        if metadata_len == 0 { &[][..] } else { std::slice::from_raw_parts(metadata, metadata_len) };
+
+    guard(error_out, || {
+        runtime.conj_i64(
+            wasm,
+            metadata,
+            (lhs_skip_type, lhs_column_index, lhs_value),
+            (rhs_skip_type, rhs_column_index, rhs_value),
+        )
+    })
 }

@@ -2,7 +2,7 @@
 """Writes a parquet file from a CSV, optionally embedding an f8 filter module and metadata.
 
     embed_f8_in_parquet data.csv plain.parquet
-    embed_f8_in_parquet data.csv enhanced.parquet --module f8_min_max_module.wasm --metadata metadata.bin
+    embed_f8_in_parquet data.csv enhanced.parquet --module f8_min_maxtrix_module.wasm --metadata metadata.bin
 
 With --module and --metadata the two blobs are stored in the parquet file's key-value metadata under
 `f8_module` and `f8_metadata`. Both must be given together or neither: a file carrying only one of

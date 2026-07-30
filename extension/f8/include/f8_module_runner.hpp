@@ -36,6 +36,11 @@ constexpr const char *F8_ENABLED_SETTING = "f8_enabled";
 //! scan. True means the module proved no row of that column can equal the value.
 ScalarFunction GetF8CanSkipEqualFunction();
 
+//! `f8_can_skip_conj(module, metadata, lhs_type, lhs_column, lhs_value, rhs_type, rhs_column, rhs_value)`
+//! - the same, for two terms that must both hold. The skip types are passed raw so that a module can be
+//! handed one it does not know.
+ScalarFunction GetF8CanSkipConjFunction();
+
 //! Registers the file-skipping provider with the database. Format-agnostic: it works for any reader
 //! that can hand over the file's key-value metadata.
 void RegisterF8SkipProvider(DatabaseInstance &db);

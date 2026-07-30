@@ -13,9 +13,15 @@
 //   f8_can_skip_equal_i64(column_index, metadata_len, value) -> u32
 //                                 1 = no row of that column can equal value, so skip the file
 //                                 0 = must read
+//   f8_conj_i64(metadata_len, lhs_type, lhs_column_index, lhs_value,
+//                             rhs_type, rhs_column_index, rhs_value) -> u32
+//                                 the same answer for two terms that must both hold
 //
-// column_index is the column's 0-based position in the file's own column order. The value arrives
-// in a register, so only the metadata crosses into linear memory.
+// column_index is the column's 0-based position in the file's own column order. Values arrive in
+// registers, so only the metadata crosses into linear memory.
+//
+// The simplest module that implements the whole ABI: per-column bounds and nothing else, so a conjunction
+// is just each term in turn. See ../min_maxtrix for one that answers from metadata about a pair jointly.
 //
 // Every unexpected input answers MUST_READ. Answering CAN_SKIP wrongly silently drops rows;
 // answering MUST_READ wrongly only costs a scan. Nothing here can trap: no division, no
@@ -41,6 +47,12 @@ typedef unsigned char u8;
 
 #define MUST_READ 0u
 #define CAN_SKIP  1u
+
+// What a term of a conjunction compares with. NONE is how the host says there is no term on this side.
+// Only equality so far; a term of any other type is answered "no information", which lets the host grow
+// this list without breaking modules already sitting in files.
+#define SKIP_TYPE_NONE  0u
+#define SKIP_TYPE_EQUAL 1u
 
 // "F8S1" read as a little endian u32.
 #define MAGIC      0x31533846u
@@ -105,9 +117,9 @@ static int get_bounds_for_columns(u32 metadata_len, u32 column_index, i64 *min, 
 	return 0;
 }
 
-EXPORT("f8_can_skip_equal_i64")
-u32 f8_can_skip_equal_i64(u32 column_index, u32 metadata_len, i64 value) {
-	if (metadata_len > METADATA_CAPACITY) {
+// One term of a predicate: can this comparison match no row at all?
+static u32 term_can_skip(u32 metadata_len, u32 skip_type, u32 column_index, i64 value) {
+	if (skip_type != SKIP_TYPE_EQUAL) {
 		return MUST_READ;
 	}
 	i64 min = 0, max = 0;
@@ -115,4 +127,27 @@ u32 f8_can_skip_equal_i64(u32 column_index, u32 metadata_len, i64 value) {
 		return MUST_READ;
 	}
 	return (value < min || value > max) ? CAN_SKIP : MUST_READ;
+}
+
+// The direct line for a lone equality: no skip type to look at, no second term to walk.
+EXPORT("f8_can_skip_equal_i64")
+u32 f8_can_skip_equal_i64(u32 column_index, u32 metadata_len, i64 value) {
+	if (metadata_len > METADATA_CAPACITY) {
+		return MUST_READ;
+	}
+	return term_can_skip(metadata_len, SKIP_TYPE_EQUAL, column_index, value);
+}
+
+// Both terms must hold, so either one matching no row rules the file out - and a term this module cannot
+// use (NONE, or a type from a newer host) does not stop the other from proving it.
+EXPORT("f8_conj_i64")
+u32 f8_conj_i64(u32 metadata_len, u32 lhs_type, u32 lhs_column_index, i64 lhs_value, u32 rhs_type, u32 rhs_column_index,
+                i64 rhs_value) {
+	if (metadata_len > METADATA_CAPACITY) {
+		return MUST_READ;
+	}
+	if (term_can_skip(metadata_len, lhs_type, lhs_column_index, lhs_value) == CAN_SKIP) {
+		return CAN_SKIP;
+	}
+	return term_can_skip(metadata_len, rhs_type, rhs_column_index, rhs_value);
 }

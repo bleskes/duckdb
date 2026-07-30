@@ -18,9 +18,18 @@ to skip a file can be made without reading any of it.
 The module never decodes anything - parquet does that. It only answers predicates over the metadata,
 which is why the engine here needs no Arrow, no dataset mapping and no custom linear memory.
 
-The example module is C, and deliberately so: the wasm ABI is language agnostic, and the engine has
+The example modules are C, and deliberately so: the wasm ABI is language agnostic, and the engine has
 no opinion about what produced the module it runs. Only the host that *runs* modules is Rust, because
 it embeds wasmtime.
+
+There are two of them, and the pair is the argument for the whole design. `min_max` records bounds per
+column, which is what an engine's own statistics already do. `min_maxtrix` records which *combinations*
+of two columns occur, and answers only conjunctions - a single value tells a record of pairs nothing. It
+prunes `a = 2 AND b = 1003` on a file holding `(1,1001) (2,1002) (3,1003)`: both values are in range, the
+combination is in no row, and no per-column statistic can tell.
+
+Keeping them apart is deliberate - one idea per example, and both read the same metadata blob, so which
+prunes what is a property of the module rather than of the file or the engine.
 
 ## Writing a file that can skip itself
 
@@ -39,8 +48,8 @@ the engine cannot be the reason a particular metadata dialect wins. Use `tools/`
 ```bash
 # from extension/f8. Any duckdb will do here - writing needs no f8.
 export F8_DUCKDB=../../build/reldebug/duckdb
-tools/build_f8_module examples/min_max/f8_min_max_module.c module.wasm
-examples/min_max/f8_min_max_metadata_generator data.csv metadata.bin
+tools/build_f8_module examples/min_maxtrix/f8_min_maxtrix_module.c module.wasm
+examples/min_maxtrix/f8_min_maxtrix_metadata_generator data.csv metadata.bin
 tools/embed_f8_in_parquet data.csv enhanced.parquet --module module.wasm --metadata metadata.bin
 ```
 
@@ -66,6 +75,11 @@ check that skipping has not changed an answer.
 ```sql
 -- true means: no row can match, so the file may be skipped.
 SELECT f8_can_skip_equal(module, metadata, column_index, value);
+
+-- two terms that must both hold. The skip types are passed raw, so a test can hand a module one it
+-- does not know and check that it answers conservatively.
+SELECT f8_can_skip_conj(module, metadata, lhs_type, lhs_column, lhs_value,
+                                          rhs_type, rhs_column, rhs_value);
 ```
 
 A `false` answer never means "no matching rows" - it means "not proven", so the caller still has
@@ -97,12 +111,13 @@ extension load.
 | Path | What |
 | --- | --- |
 | `../../run-demo.sh` | the whole chain end to end, at the repo root so its paths are the ones you build with |
-| `examples/min_max/f8_min_max_module.c` | the example filter module: freestanding C, no SIMD, imports nothing |
+| `examples/min_max/` | per-column bounds. Answers a lone equality, and a conjunction term by term |
+| `examples/min_maxtrix/` | a bit matrix per column pair. Answers *only* conjunctions - nothing else |
 | `examples/regenerate-fixtures.sh` | rewrites `test/data` using only the tools |
 | `tools/` | `build_f8_module` and `embed_f8_in_parquet`, both usable with any module and metadata |
 | `runtime/rust/` | the wasm engine: wasmtime and nothing else |
 | `runtime/include/` | `f8.hpp` C++ wrapper over the hand-written C header |
-| `f8_module_runner.cpp` | runs modules: the skip provider and the `f8_can_skip_equal` scalar |
+| `f8_module_runner.cpp` | runs modules: the skip provider and the `f8_can_skip_equal` / `f8_can_skip_conj` scalars |
 
 `CMakeLists.txt` builds `runtime/rust` with `ExternalProject_Add` + cargo, as
 `extension/delta` does. Note it does **not** simply take the first `cargo` on `PATH`: wasmtime's
@@ -119,12 +134,35 @@ f8_metadata_buffer()   -> u32   address of the buffer the host writes the metada
 f8_metadata_capacity() -> u32   its size, so the host can bounds-check
 f8_can_skip_equal_i64(column_index: u32, metadata_len: u32, value: i64) -> u32
                                       1 = can skip, 0 = must read
+f8_conj_i64(metadata_len: u32,
+            lhs_type: u32, lhs_column_index: u32, lhs_value: i64,
+            rhs_type: u32, rhs_column_index: u32, rhs_value: i64) -> u32
+                                      the same answer for two terms that must both hold
 ```
 
-The value travels in a register, so only the metadata crosses into linear memory.
+Values travel in registers, so only the metadata crosses into linear memory.
 
-The metadata this particular module understands is a sparse map from column index to bounds, so
-metadataing one column of fifty costs one entry:
+`WHERE i = 1` is the common case and takes `f8_can_skip_equal_i64` directly - three arguments, no skip
+type to dispatch on. `WHERE a = 2 AND b = 1002` reaches the scan as two entries in the filter map, one
+per column, and the extension pairs them into a single `f8_conj_i64` call. More than two predicates go as
+*every* pair, not just adjacent ones - which columns a module's joint metadata covers is not something
+the engine can guess. A skip type says what a term compares with:
+
+| type | meaning |
+| --- | --- |
+| 0 | no term on this side |
+| 1 | equality |
+
+A module answers "no information" for a type it does not know, so the list can grow without breaking
+modules already sitting in files.
+
+Asking about a conjunction in one call is what lets a module answer from metadata that only means
+something jointly: a bloom filter over `(a, b)` pairs can prune `a = 2 AND b = 1002` when both values
+occur in the file but never in the same row. Per-column bounds cannot, so this module gains nothing
+from it - but the ABI has to carry the shape for one that can.
+
+The metadata this particular module understands has two parts. First a sparse map from column index to
+bounds, so bounding one column of fifty costs one entry:
 
 ```text
 0..4    magic "F8S1"
@@ -134,6 +172,28 @@ metadataing one column of fifty costs one entry:
 
 A column with no entry has no bounds and is never skipped, which is also how a column of an
 unsupported type is represented.
+
+Then, optionally, a **bit matrix** per pair of columns that both span fewer than 256 values - one bit per
+possible combination, set when that combination occurs in some row:
+
+```text
+0..4    magic "F8M1"
+4..8    x column index u32
+8..12   y column index u32
+12..20  x_min i64
+20..28  y_min i64
+28..30  width  u16   (x_max - x_min + 1)
+30..32  height u16   (y_max - y_min + 1)
+32..    ceil(width * height / 8) bytes; bit (dy * width + dx)
+```
+
+This is the part per-column statistics cannot imitate. A file holding `(1,1001) (2,1002) (3,1003)` allows
+`a = 2` and `b = 1003` individually, so min/max - parquet's own included - must read it to answer
+`a = 2 AND b = 1003`. The matrix says that pair is in no row, and the file is never opened.
+
+Matrices come last on purpose: the entry count fixes where the bounds end, so a module that predates
+them reads the bounds and ignores the rest. Worst case is 256 x 256 bits, 8 KiB per pair, which is why
+the module's buffer is 64 KiB and why a wider pair gets no matrix rather than a huge one.
 
 The metadata format is the *module's* business, not the engine's - the extension never parses it, so
 a different module could carry a bloom filter or a geometry bounding box and nothing outside that
@@ -152,7 +212,7 @@ errors; nothing panics or aborts the process. There is a test for exactly that.
 
 ## Rebuilding the fixtures
 
-The committed fixtures - `test/data/f8_min_max_module.wasm`, the metadata blobs and the plain parquet files -
+The committed fixtures - `test/data/f8_min_maxtrix_module.wasm`, the metadata blobs and the plain parquet files -
 are produced by the tools, so tests need no wasm toolchain:
 
 ```bash

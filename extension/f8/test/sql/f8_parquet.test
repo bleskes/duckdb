@@ -11,12 +11,17 @@ require parquet
 # extension never produces these bytes, it only consumes them, so this exercises the read path
 # against input it did not create.
 #
-#   plain_a.parquet   id = 1, 2, 3         metadata_a.bin   column 0 over [1, 3]
-#   plain_b.parquet   id = 101, 102, 103   metadata_b.bin   column 0 over [101, 103]
-#   f8_min_max_module.wasm   the shared module, used by both
+#   plain_a.parquet   id = 1, 2, 3         metadata_a.bin   column 0 over [1, 3], cash over [10, 90]
+#   plain_b.parquet   id = 101, 102, 103   metadata_b.bin   column 0 over [101, 103], cash over [20, 100]
+#
+# Two example modules read those same blobs. m is min_max, which reads the per-column bounds and is what
+# most of this file is about; mx is min_maxtrix, which reads only the bit matrices appended after them.
 
 statement ok
 SET VARIABLE m = (SELECT content FROM read_blob('test/data/f8_min_max_module.wasm'));
+
+statement ok
+SET VARIABLE mx = (SELECT content FROM read_blob('test/data/f8_min_maxtrix_module.wasm'));
 
 statement ok
 SET VARIABLE sa = (SELECT content FROM read_blob('test/data/metadata_a.bin'));
@@ -351,3 +356,249 @@ query I
 SELECT count(*) FROM '__TEST_DIR__/other_kv.parquet' WHERE id = 2
 ----
 1
+
+# Conjunctions in a scan. `a = 2 AND b = 1002` reaches the scan as two entries in the filter map, one
+# per column, so it is the extension that pairs them into a single question for the module.
+#
+# Which entry point a shape takes is not observable from the answers - for per-column bounds, a pair
+# asked jointly and a pair asked one term at a time agree - so this uses a module with the conjunction
+# export removed. A lone equality still works against it; a pair cannot be answered at all.
+statement ok
+SET VARIABLE eo = (SELECT content FROM read_blob('test/data/f8_equal_only_module.wasm'));
+
+# Both files claim column 0 over [100, 200] and column 1 over [-5, 5], which is a lie about two.parquet
+# (a is 1..3, b is 1001..1003). Lying is the only way to see a skip at all here: an honest bound cannot
+# rule out a value that parquet's own statistics have not already ruled out at plan time.
+statement ok
+SET VARIABLE lie = (SELECT content FROM read_blob('test/data/metadata_3col.bin'));
+
+statement ok
+COPY (FROM 'test/data/plain_two.parquet') TO '__TEST_DIR__/conj_full.parquet'
+    (FORMAT parquet, KV_METADATA {f8_module: getvariable('m'), f8_metadata: getvariable('lie')});
+
+statement ok
+COPY (FROM 'test/data/plain_two.parquet') TO '__TEST_DIR__/conj_equal_only.parquet'
+    (FORMAT parquet, KV_METADATA {f8_module: getvariable('eo'), f8_metadata: getvariable('lie')});
+
+# The row is really there, so a 0 means the file was skipped. A module with both entry points skips for
+# either shape.
+query II
+SELECT
+    (SELECT count(*) FROM '__TEST_DIR__/conj_full.parquet' WHERE a = 2),
+    (SELECT count(*) FROM '__TEST_DIR__/conj_full.parquet' WHERE a = 2 AND b = 1002)
+----
+0	0
+
+# With only the direct entry point the lone equality still skips, and the pair does not - so the pair
+# went through f8_conj_i64 rather than being taken apart into single terms.
+query II
+SELECT
+    (SELECT count(*) FROM '__TEST_DIR__/conj_equal_only.parquet' WHERE a = 2),
+    (SELECT count(*) FROM '__TEST_DIR__/conj_equal_only.parquet' WHERE a = 2 AND b = 1002)
+----
+0	1
+
+# A module missing an export is a broken file, not a broken query: it costs a scan and warns.
+statement ok
+SET f8_enabled = false
+
+query II
+SELECT
+    (SELECT count(*) FROM '__TEST_DIR__/conj_equal_only.parquet' WHERE a = 2),
+    (SELECT count(*) FROM '__TEST_DIR__/conj_full.parquet' WHERE a = 2 AND b = 1002)
+----
+1	1
+
+statement ok
+SET f8_enabled = true
+
+# Three predicates go as consecutive pairs, which touches every one of them. Here the lie rules out
+# column 1, which only the second pair asks about.
+query I
+SELECT count(*) FROM '__TEST_DIR__/conj_full.parquet' WHERE a = 150 AND b = 1002 AND a <> 151
+----
+0
+
+# Correctness with honest metadata: a conjunction must answer exactly as it does with skipping off, and
+# as the plain file does.
+statement ok
+COPY (FROM 'test/data/plain_two.parquet') TO '__TEST_DIR__/conj_honest.parquet'
+    (FORMAT parquet, KV_METADATA {f8_module: getvariable('m'), f8_metadata: getvariable('stwo')});
+
+statement ok
+CREATE MACRO pair(av, bv) AS (
+    SELECT count(*) FROM '__TEST_DIR__/conj_honest.parquet' WHERE a = av AND b = bv);
+
+statement ok
+CREATE TABLE pairs AS SELECT * FROM (VALUES
+    (1, 1001), (2, 1002), (3, 1003), (1, 1002), (2, 9999), (999, 1002), (0, 0), (-1, -1)) v(av, bv);
+
+query I
+SELECT count(*) FROM pairs WHERE pair(av, bv) <>
+    (SELECT count(*) FROM 'test/data/plain_two.parquet' p WHERE p.a = av AND p.b = bv)
+----
+0
+
+statement ok
+SET f8_enabled = false
+
+query I
+SELECT count(*) FROM pairs WHERE pair(av, bv) <>
+    (SELECT count(*) FROM 'test/data/plain_two.parquet' p WHERE p.a = av AND p.b = bv)
+----
+0
+
+statement ok
+SET f8_enabled = true
+
+statement ok
+DROP MACRO pair
+
+# The bit matrix in a scan. two.parquet holds (1,1001), (2,1002), (3,1003), so every value below is
+# inside its own column's bounds and min/max can prove nothing at all - only the record of which pairs
+# occur together can, which is why the conjunction is asked as one question.
+statement ok
+COPY (FROM 'test/data/plain_two.parquet') TO '__TEST_DIR__/matrix.parquet'
+    (FORMAT parquet, KV_METADATA {f8_module: getvariable('mx'), f8_metadata: getvariable('stwo')});
+
+# A pair that occurs is read; the file must be opened. The three absent pairs are answered without
+# opening it - and the answers agree, because they really do match no row.
+query IIII
+SELECT
+    (SELECT count(*) FROM '__TEST_DIR__/matrix.parquet' WHERE a = 2 AND b = 1002),
+    (SELECT count(*) FROM '__TEST_DIR__/matrix.parquet' WHERE a = 2 AND b = 1003),
+    (SELECT count(*) FROM '__TEST_DIR__/matrix.parquet' WHERE a = 1 AND b = 1003),
+    (SELECT count(*) FROM '__TEST_DIR__/matrix.parquet' WHERE a = 3 AND b = 1001)
+----
+1	0	0	0
+
+# Not opened, not merely filtered. This is the first prune here that per-column statistics cannot do:
+# parquet's own min/max would have to read the file to answer it.
+query II
+EXPLAIN ANALYZE SELECT * FROM '__TEST_DIR__/matrix.parquet' WHERE a = 2 AND b = 1003
+----
+analyzed_plan	<REGEX>:[\s\S]*Total Files Read: 0[\s\S]*Files Skipped: 1[\s\S]*
+
+# The pair that does occur has to be read, or the matrix would be losing rows rather than saving reads.
+query II
+EXPLAIN ANALYZE SELECT * FROM '__TEST_DIR__/matrix.parquet' WHERE a = 2 AND b = 1002
+----
+analyzed_plan	<REGEX>:[\s\S]*Total Files Read: 1[\s\S]*
+
+# Skipping must not change an answer, matrix included: every combination of the two columns, against the
+# plain file, with skipping on and then off.
+statement ok
+CREATE TABLE combos AS SELECT av, bv FROM (SELECT unnest([0,1,2,3,4]) AS av), (SELECT unnest([1000,1001,1002,1003,1004]) AS bv);
+
+statement ok
+CREATE MACRO enhanced_pair(av, bv) AS (
+    SELECT count(*) FROM '__TEST_DIR__/matrix.parquet' WHERE a = av AND b = bv);
+
+statement ok
+CREATE MACRO plain_pair(av, bv) AS (
+    SELECT count(*) FROM 'test/data/plain_two.parquet' WHERE a = av AND b = bv);
+
+query I
+SELECT count(*) FROM combos WHERE enhanced_pair(av, bv) <> plain_pair(av, bv)
+----
+0
+
+statement ok
+SET f8_enabled = false
+
+query I
+SELECT count(*) FROM combos WHERE enhanced_pair(av, bv) <> plain_pair(av, bv)
+----
+0
+
+statement ok
+SET f8_enabled = true
+
+# Three predicates, and the pair that proves it is not an adjacent one. triple.csv is (1,1,1), (2,1,2):
+# (p,q) = (1,1) occurs, (q,r) = (1,2) occurs, but (p,r) = (1,2) occurs in no row. Asking only adjacent
+# pairs would read this file, so this is the assertion that the scan asks about every pair.
+statement ok
+SET VARIABLE striple = (SELECT content FROM read_blob('test/data/metadata_triple.bin'));
+
+statement ok
+COPY (FROM 'test/data/plain_triple.parquet') TO '__TEST_DIR__/triple.parquet'
+    (FORMAT parquet, KV_METADATA {f8_module: getvariable('mx'), f8_metadata: getvariable('striple')});
+
+query II
+EXPLAIN ANALYZE SELECT * FROM '__TEST_DIR__/triple.parquet' WHERE p = 1 AND q = 1 AND r = 2
+----
+analyzed_plan	<REGEX>:[\s\S]*Total Files Read: 0[\s\S]*Files Skipped: 1[\s\S]*
+
+# The two rows that are there must still come back, whichever way they are asked for.
+query III
+SELECT p, q, r FROM '__TEST_DIR__/triple.parquet' WHERE p = 2 AND q = 1 AND r = 2
+----
+2	1	2
+
+query I
+SELECT count(*) FROM '__TEST_DIR__/triple.parquet' WHERE p = 1 AND q = 1 AND r = 1
+----
+1
+
+statement ok
+DROP MACRO enhanced_pair
+
+statement ok
+DROP MACRO plain_pair
+
+# The example CSVs carry a second integer column, so metadata_a has a matrix on (id, cash) as well as
+# bounds. a.csv is (1,alice,10) (2,bob,50) (3,carol,90): id = 2 AND cash = 90 is inside both columns'
+# ranges and in no row, which is the case only a joint record can answer.
+statement ok
+COPY (FROM 'test/data/plain_a.parquet') TO '__TEST_DIR__/cash_maxtrix.parquet'
+    (FORMAT parquet, KV_METADATA {f8_module: getvariable('mx'), f8_metadata: getvariable('sa')});
+
+# Same bytes, same metadata, read by the module that knows only about bounds.
+statement ok
+COPY (FROM 'test/data/plain_a.parquet') TO '__TEST_DIR__/cash_minmax.parquet'
+    (FORMAT parquet, KV_METADATA {f8_module: getvariable('m'), f8_metadata: getvariable('sa')});
+
+query II
+EXPLAIN ANALYZE SELECT * FROM '__TEST_DIR__/cash_maxtrix.parquet' WHERE id = 2 AND cash = 90
+----
+analyzed_plan	<REGEX>:[\s\S]*Total Files Read: 0[\s\S]*Files Skipped: 1[\s\S]*
+
+# The bounds-only module cannot prove it and reads the file - which is also the check that it is not
+# tripped up by the matrix bytes appended after the entries it does understand.
+query II
+EXPLAIN ANALYZE SELECT * FROM '__TEST_DIR__/cash_minmax.parquet' WHERE id = 2 AND cash = 90
+----
+analyzed_plan	<REGEX>:[\s\S]*Total Files Read: 1[\s\S]*
+
+# A pair that does occur must be read by both, or the matrix would be losing rows.
+query II
+SELECT
+    (SELECT count(*) FROM '__TEST_DIR__/cash_maxtrix.parquet' WHERE id = 2 AND cash = 50),
+    (SELECT count(*) FROM '__TEST_DIR__/cash_minmax.parquet' WHERE id = 2 AND cash = 50)
+----
+1	1
+
+# Every combination of the two columns, against the plain file, with skipping on and then off.
+statement ok
+CREATE TABLE cash_combos AS SELECT i AS idv, c AS cashv
+    FROM (SELECT unnest([0,1,2,3,4]) AS i), (SELECT unnest([0,10,50,90,100]) AS c);
+
+query I
+SELECT count(*) FROM cash_combos WHERE
+    (SELECT count(*) FROM '__TEST_DIR__/cash_maxtrix.parquet' WHERE id = idv AND cash = cashv) <>
+    (SELECT count(*) FROM 'test/data/plain_a.parquet' WHERE id = idv AND cash = cashv)
+----
+0
+
+statement ok
+SET f8_enabled = false
+
+query I
+SELECT count(*) FROM cash_combos WHERE
+    (SELECT count(*) FROM '__TEST_DIR__/cash_maxtrix.parquet' WHERE id = idv AND cash = cashv) <>
+    (SELECT count(*) FROM 'test/data/plain_a.parquet' WHERE id = idv AND cash = cashv)
+----
+0
+
+statement ok
+SET f8_enabled = true

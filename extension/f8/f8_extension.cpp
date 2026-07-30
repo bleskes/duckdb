@@ -9,6 +9,7 @@ namespace {
 
 void LoadInternal(ExtensionLoader &loader) {
 	loader.RegisterFunction(GetF8CanSkipEqualFunction());
+	loader.RegisterFunction(GetF8CanSkipConjFunction());
 
 	auto &db = loader.GetDatabaseInstance();
 	DBConfig::GetConfig(db).AddExtensionOption(

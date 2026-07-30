@@ -4,7 +4,8 @@
 //! Two entry points, one engine:
 //!
 //!   * a FileSkipProvider registered with core, which is how a scan reaches this
-//!   * the `f8_can_skip_equal` scalar, for evaluating a module directly without a scan
+//!   * the `f8_can_skip_equal` and `f8_can_skip_conj` scalars, for evaluating a module directly
+//!     without a scan
 //!
 //! They differ in one deliberate way: a module that cannot be run is an *error* for the scalar,
 //! because the caller asked for it, and is *ignored* during a scan, because one unreadable file
@@ -48,27 +49,44 @@ const_data_ptr_t BlobData(const string_t &blob) {
 // Running a module during a scan
 //===--------------------------------------------------------------------===//
 
-//! Asks the module whether `value` can match no row of `column_index`.
-//!
-//! Never throws: skipping is an optimisation, so anything that goes wrong here answers "read the
-//! file", which is always correct. Also honours the setting that turns skipping off.
-bool CanSkipEqual(ClientContext &context, const string &module, const string &metadata, uint32_t column_index,
-                  int64_t value) {
+bool SkippingEnabled(ClientContext &context) {
 	Value enabled(true);
 	context.TryGetCurrentSetting(F8_ENABLED_SETTING, enabled);
-	if (!enabled.GetValue<bool>()) {
+	return enabled.GetValue<bool>();
+}
+
+//! Runs `ask` against the module, turning any failure into "read the file". Never throws: skipping is an
+//! optimisation, so a conservative answer is always correct. Honours the setting that turns it off.
+template <class ASK>
+bool AskModule(ClientContext &context, ASK &&ask) {
+	if (!SkippingEnabled(context)) {
 		return false;
 	}
 	try {
-		auto verdict =
-		    GetRuntime().CanSkipEqual(const_data_ptr_cast(module.c_str()), module.size(),
-		                              const_data_ptr_cast(metadata.c_str()), metadata.size(), column_index, value);
-		return verdict == f8::SkipVerdict::CAN_SKIP;
+		return ask(GetRuntime()) == f8::SkipVerdict::CAN_SKIP;
 	} catch (const std::exception &error) {
 		DUCKDB_LOG_WARNING(
 		    context, StringUtil::Format("f8: could not run the filter module, reading the file: %s", error.what()));
 		return false;
 	}
+}
+
+//! Asks the module whether `value` can match no row of `column_index`.
+bool CanSkipEqual(ClientContext &context, const string &module, const string &metadata, uint32_t column_index,
+                  int64_t value) {
+	return AskModule(context, [&](const f8::Runtime &runtime) {
+		return runtime.CanSkipEqual(const_data_ptr_cast(module.c_str()), module.size(),
+		                            const_data_ptr_cast(metadata.c_str()), metadata.size(), column_index, value);
+	});
+}
+
+//! Asks the module about two terms that must both hold, in one call.
+bool CanSkipConjunction(ClientContext &context, const string &module, const string &metadata, const f8::SkipTerm &lhs,
+                        const f8::SkipTerm &rhs) {
+	return AskModule(context, [&](const f8::Runtime &runtime) {
+		return runtime.CanSkipConjunction(const_data_ptr_cast(module.c_str()), module.size(),
+		                                  const_data_ptr_cast(metadata.c_str()), metadata.size(), lhs, rhs);
+	});
 }
 
 //===--------------------------------------------------------------------===//
@@ -80,6 +98,10 @@ struct EqualityPredicate {
 	idx_t metadata_column;
 	int64_t value;
 };
+
+f8::SkipTerm AsSkipTerm(const EqualityPredicate &predicate) {
+	return f8::SkipTerm {f8::SkipType::EQUAL, NumericCast<uint32_t>(predicate.metadata_column), predicate.value};
+}
 
 //! Collects integer equality predicates the metadata could rule out.
 //!
@@ -165,11 +187,21 @@ bool F8CanSkipFile(FileSkipProviderInput &input) {
 		CollectEqualityPredicates(entry.second.get(), entry.first, predicates);
 	}
 
-	// Any single predicate proving no match rules the whole file out.
-	for (auto &predicate : predicates) {
-		if (CanSkipEqual(input.context, module_entry->second, metadata_entry->second,
-		                 NumericCast<uint32_t>(predicate.metadata_column), predicate.value)) {
-			return true;
+	// Every predicate has to hold, so any one of them proving no match rules the whole file out. A
+	// single predicate goes as itself, down the direct entry point.
+	if (predicates.size() == 1) {
+		return CanSkipEqual(input.context, module_entry->second, metadata_entry->second,
+		                    NumericCast<uint32_t>(predicates[0].metadata_column), predicates[0].value);
+	}
+	// Several go as pairs, so a module can answer from metadata that only means something jointly. Every
+	// pair rather than only adjacent ones: which columns such metadata covers is not something the engine
+	// can guess. Quadratic in the predicate count, which in practice is two or three.
+	for (idx_t lhs = 0; lhs < predicates.size(); lhs++) {
+		for (idx_t rhs = lhs + 1; rhs < predicates.size(); rhs++) {
+			if (CanSkipConjunction(input.context, module_entry->second, metadata_entry->second,
+			                       AsSkipTerm(predicates[lhs]), AsSkipTerm(predicates[rhs]))) {
+				return true;
+			}
 		}
 	}
 	return false;
@@ -228,12 +260,80 @@ void F8CanSkipEqualFunction(DataChunk &args, ExpressionState &, Vector &result) 
 	}
 }
 
+//! `f8_can_skip_conj(module, metadata, lhs_type, lhs_column, lhs_value, rhs_type, rhs_column, rhs_value)`
+//!
+//! Skip types are raw rather than assumed, so a test can hand a module a type it does not know and check
+//! that it answers conservatively. The scan path can never produce one.
+void F8CanSkipConjFunction(DataChunk &args, ExpressionState &, Vector &result) {
+	auto count = args.size();
+	static constexpr idx_t ARGUMENT_COUNT = 8;
+	UnifiedVectorFormat formats[ARGUMENT_COUNT];
+	for (idx_t argument = 0; argument < ARGUMENT_COUNT; argument++) {
+		args.data[argument].ToUnifiedFormat(count, formats[argument]);
+	}
+
+	result.SetVectorType(VectorType::FLAT_VECTOR);
+	auto result_data = FlatVector::GetData<bool>(result);
+	auto &result_validity = FlatVector::Validity(result);
+
+	auto &runtime = GetRuntime();
+	for (idx_t i = 0; i < count; i++) {
+		auto row_is_valid = true;
+		for (idx_t argument = 0; argument < ARGUMENT_COUNT; argument++) {
+			if (!formats[argument].validity.RowIsValid(formats[argument].sel->get_index(i))) {
+				row_is_valid = false;
+				break;
+			}
+		}
+		if (!row_is_valid) {
+			result_validity.SetInvalid(i);
+			continue;
+		}
+
+		//! Reads argument `argument` of row i.
+		auto blob = [&](idx_t argument) {
+			return UnifiedVectorFormat::GetData<string_t>(formats[argument])[formats[argument].sel->get_index(i)];
+		};
+		auto integer = [&](idx_t argument) {
+			auto value = UnifiedVectorFormat::GetData<int32_t>(formats[argument])[formats[argument].sel->get_index(i)];
+			if (value < 0) {
+				throw InvalidInputException("f8_can_skip_conj: skip types and column indexes must not be negative");
+			}
+			return NumericCast<uint32_t>(value);
+		};
+		auto big_integer = [&](idx_t argument) {
+			return UnifiedVectorFormat::GetData<int64_t>(formats[argument])[formats[argument].sel->get_index(i)];
+		};
+
+		f8::SkipTerm lhs {static_cast<f8::SkipType>(integer(2)), integer(3), big_integer(4)};
+		f8::SkipTerm rhs {static_cast<f8::SkipType>(integer(5)), integer(6), big_integer(7)};
+
+		auto module = blob(0);
+		auto metadata = blob(1);
+		try {
+			auto verdict = runtime.CanSkipConjunction(BlobData(module), module.GetSize(), BlobData(metadata),
+			                                          metadata.GetSize(), lhs, rhs);
+			result_data[i] = verdict == f8::SkipVerdict::CAN_SKIP;
+		} catch (const f8::F8Error &error) {
+			// Unlike a scan, a direct call reports the problem: the caller asked for this module.
+			throw InvalidInputException("f8_can_skip_conj: %s", error.what());
+		}
+	}
+}
+
 } // namespace
 
 ScalarFunction GetF8CanSkipEqualFunction() {
 	return ScalarFunction("f8_can_skip_equal",
 	                      {LogicalType::BLOB, LogicalType::BLOB, LogicalType::INTEGER, LogicalType::BIGINT},
 	                      LogicalType::BOOLEAN, F8CanSkipEqualFunction);
+}
+
+ScalarFunction GetF8CanSkipConjFunction() {
+	return ScalarFunction("f8_can_skip_conj",
+	                      {LogicalType::BLOB, LogicalType::BLOB, LogicalType::INTEGER, LogicalType::INTEGER,
+	                       LogicalType::BIGINT, LogicalType::INTEGER, LogicalType::INTEGER, LogicalType::BIGINT},
+	                      LogicalType::BOOLEAN, F8CanSkipConjFunction);
 }
 
 void RegisterF8SkipProvider(DatabaseInstance &db) {

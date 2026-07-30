@@ -4,7 +4,7 @@
 #     build_f8_module source.c output.wasm
 #
 # Generic: it knows nothing about any particular metadata dialect, only how to produce a wasm module
-# with no imports. The bundled example is examples/min_max/f8_min_max_module.c.
+# with no imports. The bundled example is examples/min_maxtrix/f8_min_maxtrix_module.c.
 #
 # C is only what the example happens to use. The ABI is three exported functions and an exported
 # memory with no imports, so C++, Zig, Rust and hand-written WAT work too - see README.md.

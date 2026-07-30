@@ -101,3 +101,237 @@ FROM read_blob('test/data/metadata_3col.bin') s
 
 statement ok
 DROP MACRO can_skip
+
+# Conjunctions: two terms that must both hold, asked in one call so a module can answer from metadata
+# that only means something jointly. This module keeps per-column bounds, so it can only check each
+# term - but the terms have to reach it, which is what these assert.
+statement ok
+CREATE MACRO conj(lhs_type, lhs_col, lhs_val, rhs_type, rhs_col, rhs_val) AS f8_can_skip_conj(
+    (SELECT content FROM read_blob('test/data/f8_min_max_module.wasm')),
+    (SELECT content FROM read_blob('test/data/metadata_two.bin')),
+    lhs_type, lhs_col, lhs_val, rhs_type, rhs_col, rhs_val);
+
+# metadata_two has column 0 over [1, 3] and column 1 over [1001, 1003]. The skip type for equality
+# is 1; 0 means "no term here".
+statement ok
+CREATE MACRO eq() AS 1
+
+# Either term proving no match rules out the conjunction. Both of these need the second term to have
+# been evaluated, since the first one alone proves nothing.
+query II
+SELECT conj(eq(), 0, 2, eq(), 1, 9999), conj(eq(), 0, 2, eq(), 1, 0)
+----
+true	true
+
+# ... and symmetrically, through the first term.
+query II
+SELECT conj(eq(), 0, 999, eq(), 1, 1002), conj(eq(), 0, -1, eq(), 1, 1002)
+----
+true	true
+
+# Both terms inside their own column's bounds: nothing is proven. This macro runs the bounds-only module,
+# so the bit matrix in the same blob is not consulted - see the min_maxtrix section below for that.
+query II
+SELECT conj(eq(), 0, 2, eq(), 1, 1002), conj(eq(), 0, 1, eq(), 1, 1001)
+----
+false	false
+
+# Bounds stay per column, so a value that is in range for the other column proves nothing about this
+# one. 2 is in column 0's range and 1002 is in column 1's; crossing them proves both empty.
+query II
+SELECT conj(eq(), 0, 1002, eq(), 1, 2), conj(eq(), 0, 2, eq(), 1, 1002)
+----
+true	false
+
+# A term of type NONE is how a lone comparison is expressed, and must not affect the other term.
+query IIII
+SELECT conj(eq(), 0, 2, 0, 0, 0), conj(eq(), 0, 999, 0, 0, 0),
+       conj(0, 0, 0, eq(), 1, 1002), conj(0, 0, 0, eq(), 1, 9999)
+----
+false	true	false	true
+
+# Two NONE terms say nothing at all.
+query I
+SELECT conj(0, 0, 0, 0, 0, 0)
+----
+false
+
+# A skip type this module has never heard of is answered conservatively rather than guessed at. The
+# scan path cannot produce one, which is why it is worth asserting here.
+query II
+SELECT conj(7, 0, 9999, 0, 0, 0), conj(7, 0, 9999, eq(), 1, 9999)
+----
+false	true
+
+# A column with no entry in the metadata is never skipped, in either position.
+query II
+SELECT conj(eq(), 9, 9999, 0, 0, 0), conj(eq(), 9, 9999, eq(), 1, 9999)
+----
+false	true
+
+# NULL in any argument gives NULL, as with the single-term form.
+query III
+SELECT conj(NULL, 0, 2, eq(), 1, 9999), conj(eq(), NULL, 2, eq(), 1, 9999),
+       conj(eq(), 0, 2, eq(), 1, NULL)
+----
+NULL	NULL	NULL
+
+# Negative skip types and column indexes are rejected rather than cast into a large unsigned value.
+statement error
+SELECT conj(eq(), -1, 2, 0, 0, 0)
+----
+<REGEX>:.*f8_can_skip_conj.*negative.*
+
+# A module that cannot be run is an error here, not a silent "must read" - the caller asked for it.
+statement error
+SELECT f8_can_skip_conj('this is not a wasm module'::BLOB, s.content, 1, 0, 2, 0, 0, 0)
+FROM read_blob('test/data/metadata_two.bin') s
+----
+<REGEX>:.*f8_can_skip_conj.*
+
+statement ok
+DROP MACRO conj
+
+statement ok
+DROP MACRO eq
+
+# The bit matrix: which (x, y) combinations occur together in some row. It rules out a pair that each
+# column's own bounds allow, which is the only reason the conjunction entry point has to exist.
+statement ok
+CREATE MACRO m2(lhs_col, lhs_val, rhs_col, rhs_val) AS f8_can_skip_conj(
+    (SELECT content FROM read_blob('test/data/f8_min_maxtrix_module.wasm')),
+    (SELECT content FROM read_blob('test/data/metadata_two.bin')),
+    1, lhs_col, lhs_val, 1, rhs_col, rhs_val);
+
+# two.csv holds (1,1001), (2,1002), (3,1003) - the diagonal of a 3x3 matrix. Every value below is inside
+# its own column's bounds, so min/max proves nothing about any of them.
+query III
+SELECT m2(0, 1, 1, 1001), m2(0, 2, 1, 1002), m2(0, 3, 1, 1003)
+----
+false	false	false
+
+# Off the diagonal: the combination is in no row, and only the matrix knows.
+query IIII
+SELECT m2(0, 2, 1, 1003), m2(0, 1, 1, 1003), m2(0, 3, 1, 1001), m2(0, 1, 1, 1002)
+----
+true	true	true	true
+
+# The matrix is stored for the column pair (0, 1); a query naming them the other way round must get the
+# same answer, or half of all conjunctions would silently lose the optimisation.
+query IIII
+SELECT m2(1, 1003, 0, 2), m2(1, 1002, 0, 2), m2(1, 1001, 0, 3), m2(1, 1002, 0, 1)
+----
+true	false	true	true
+
+# Outside a matrix dimension entirely: that value occurs in no row at all, which the bounds also catch.
+query II
+SELECT m2(0, 99, 1, 1002), m2(0, 2, 1, 99)
+----
+true	true
+
+# A pair with no matrix is not proven at all here: this module has only matrices, and no matrix covers
+# column 9. min_max would still rule the second one out from column 0's bounds, but that is a different
+# module reading the same bytes.
+query II
+SELECT m2(0, 2, 9, 5), m2(9, 5, 0, 99)
+----
+false	false
+
+# min_maxtrix holds only the matrix, so its lone-equality entry point can never prove anything: one value
+# says nothing about which combinations occur, and it does not read the bounds in the same blob. Even 99,
+# which is outside column 0 entirely, is "not proven" - that is min_max's job.
+query II
+SELECT
+    f8_can_skip_equal((SELECT content FROM read_blob('test/data/f8_min_maxtrix_module.wasm')),
+                      (SELECT content FROM read_blob('test/data/metadata_two.bin')), 0, 2),
+    f8_can_skip_equal((SELECT content FROM read_blob('test/data/f8_min_maxtrix_module.wasm')),
+                      (SELECT content FROM read_blob('test/data/metadata_two.bin')), 0, 99)
+----
+false	false
+
+# A metadata blob with no matrices at all still answers, just from bounds alone.
+query II
+SELECT
+    f8_can_skip_conj((SELECT content FROM read_blob('test/data/f8_min_max_module.wasm')),
+                     (SELECT content FROM read_blob('test/data/metadata_a.bin')), 1, 0, 2, 1, 0, 2),
+    f8_can_skip_conj((SELECT content FROM read_blob('test/data/f8_min_max_module.wasm')),
+                     (SELECT content FROM read_blob('test/data/metadata_a.bin')), 1, 0, 99, 1, 0, 2)
+----
+false	true
+
+# Truncating the blob mid-matrix must not be read past. metadata_two is 90 bytes: 8 header, two 24-byte
+# entries, then a 32-byte matrix header and 2 bytes of bits.
+statement ok
+CREATE MACRO truncated(n) AS f8_can_skip_conj(
+    (SELECT content FROM read_blob('test/data/f8_min_maxtrix_module.wasm')),
+    (SELECT content FROM read_blob('test/data/metadata_two.bin'))[1:n]::BLOB,
+    1, 0, 2, 1, 1, 1003);
+
+# 88 bytes cuts the bits off the matrix, 60 lands inside its header, 56 stops right after the entries.
+# None may answer true: the matrix that would have proven it is not all there.
+query III
+SELECT truncated(88), truncated(60), truncated(56)
+----
+false	false	false
+
+# The full 90 bytes does prove it, so the assertions above are about the truncation and nothing else.
+query I
+SELECT truncated(90)
+----
+true
+
+statement ok
+DROP MACRO truncated
+
+statement ok
+DROP MACRO m2
+
+# Two example modules read the same metadata blob. min_max carries per-column bounds and nothing else;
+# min_maxtrix also reads the bit matrices appended after them. Comparing them side by side is both what
+# the matrix buys and the proof that appending it was a compatible change: the older dialect reads the
+# bounds and never looks at the rest.
+statement ok
+CREATE MACRO by_min_max(lc, lv, rc, rv) AS f8_can_skip_conj(
+    (SELECT content FROM read_blob('test/data/f8_min_max_module.wasm')),
+    (SELECT content FROM read_blob('test/data/metadata_two.bin')), 1, lc, lv, 1, rc, rv);
+
+statement ok
+CREATE MACRO by_min_maxtrix(lc, lv, rc, rv) AS f8_can_skip_conj(
+    (SELECT content FROM read_blob('test/data/f8_min_maxtrix_module.wasm')),
+    (SELECT content FROM read_blob('test/data/metadata_two.bin')), 1, lc, lv, 1, rc, rv);
+
+# A pair that no row holds, but which both columns' bounds allow. Only the matrix can prove it, and this
+# is the one case where the two modules disagree.
+query II
+SELECT by_min_max(0, 2, 1, 1003), by_min_maxtrix(0, 2, 1, 1003)
+----
+false	true
+
+# A pair that does occur: neither may skip.
+query II
+SELECT by_min_max(0, 2, 1, 1002), by_min_maxtrix(0, 2, 1, 1002)
+----
+false	false
+
+# A value outside its column's bounds: both prove it, the bounds alone being enough.
+query IIII
+SELECT by_min_max(0, 99, 1, 1002), by_min_maxtrix(0, 99, 1, 1002),
+       by_min_max(0, 2, 1, 99), by_min_maxtrix(0, 2, 1, 99)
+----
+true	true	true	true
+
+# The bounds-only module must not be confused by the trailing matrix bytes - it answers as it always did.
+query II
+SELECT
+    f8_can_skip_equal((SELECT content FROM read_blob('test/data/f8_min_max_module.wasm')),
+                      (SELECT content FROM read_blob('test/data/metadata_two.bin')), 0, 2),
+    f8_can_skip_equal((SELECT content FROM read_blob('test/data/f8_min_max_module.wasm')),
+                      (SELECT content FROM read_blob('test/data/metadata_two.bin')), 0, 99)
+----
+false	true
+
+statement ok
+DROP MACRO by_min_max
+
+statement ok
+DROP MACRO by_min_maxtrix

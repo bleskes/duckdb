@@ -1,4 +1,4 @@
-id,name
-101,dave
-102,erin
-103,frank
+id,name,cash
+101,dave,20
+102,erin,60
+103,frank,100

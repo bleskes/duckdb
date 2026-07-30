@@ -5,7 +5,7 @@ only *reads*: it has no function that builds metadata and it ships no module, so
 supported way to make the two blobs a file carries.
 
 ```
-   data.csv ──► f8_min_max_metadata_generator ──► metadata.bin ─┐
+   data.csv ──► <a metadata generator> ─────────► metadata.bin ─┐
                                                                 ├─► embed_f8_in_parquet ─► enhanced.parquet
    module.c ──► build_f8_module ────────────────► module.wasm ──┘                       └─► plain.parquet
 ```
@@ -17,11 +17,15 @@ Generic, usable with any module and metadata:
 | `embed_f8_in_parquet` | CSV → parquet, with or without the two blobs embedded |
 | `build_f8_module` | compiles a C source file → wasm module |
 
-Example, specific to the min/max dialect that `../examples/min_max/f8_min_max_module.c` implements:
+Examples, each specific to the dialect its own module implements:
 
 | tool | does |
 | --- | --- |
-| `../examples/min_max/f8_min_max_metadata_generator` | CSV → `metadata.bin` (min/max per integer column) |
+| `../examples/min_max/f8_min_max_metadata_generator` | CSV → bounds per integer column |
+| `../examples/min_maxtrix/f8_min_maxtrix_metadata_generator` | the same, plus a bit matrix per narrow column pair |
+
+The `min_maxtrix` *module* reads only the matrices, so it answers conjunctions and nothing else; its
+generator still writes the bounds, because the same blob is what `min_max` reads.
 | `../examples/regenerate-fixtures.sh` | rewrites the committed test fixtures from the example CSVs |
 
 The split is the point: **there is no general "make the metadata" tool, and there cannot be.** Metadata
@@ -56,8 +60,9 @@ reading everything.
 
 ## Writing your own filter module
 
-The example module is freestanding C (`../examples/min_max/f8_min_max_module.c`, about 120 lines). **Nothing about the
-ABI is language specific** - three exported functions and an exported memory, no imports - so C++,
+The example modules are freestanding C (`../examples/min_max/f8_min_max_module.c` is the shorter one, about
+140 lines). **Nothing about the
+ABI is language specific** - four exported functions and an exported memory, no imports - so C++,
 Zig, Rust, AssemblyScript, TinyGo or hand-written WAT work equally well.
 
 ```
@@ -66,7 +71,15 @@ f8_metadata_capacity() -> u32   its size, so the host can bounds-check before wr
 f8_can_skip_equal_i64(column_index: u32, metadata_len: u32, value: i64) -> u32
                               1 = no row of that column can equal value, so skip the file
                               0 = must read
+f8_conj_i64(metadata_len: u32, lhs_type: u32, lhs_column_index: u32, lhs_value: i64,
+                               rhs_type: u32, rhs_column_index: u32, rhs_value: i64) -> u32
+                              the same answer for two terms that must both hold
 ```
+
+Both are required. A lone `WHERE i = 1` takes the first directly; `WHERE a = 2 AND b = 1002` takes the
+second, so a module can answer from metadata that only means something jointly - a bloom filter over
+`(a, b)` pairs, say. A term's type is 0 for "no term on this side" or 1 for equality, and a type a module
+does not know must be answered "no information" rather than guessed at.
 
 `column_index` is the column's 0-based position in the file's own column order. The value arrives in
 a register, so only the metadata crosses into wasm memory.
@@ -86,6 +99,14 @@ unsigned f8_can_skip_equal_i64(unsigned column, unsigned len, long long value) {
     // interpret METADATA[0..len) however you like, then:
     return can_prove_no_match ? 1u : 0u;
 }
+
+EXPORT("f8_conj_i64")
+unsigned f8_conj_i64(unsigned len, unsigned lhs_type, unsigned lhs_column, long long lhs_value,
+                                   unsigned rhs_type, unsigned rhs_column, long long rhs_value) {
+    // both terms must hold, so either one matching no row is enough
+    return (term(len, lhs_type, lhs_column, lhs_value) || term(len, rhs_type, rhs_column, rhs_value))
+               ? 1u : 0u;
+}
 ```
 
 **Toolchain note.** A wasm32-capable clang and a `wasm-ld` often come from different places: Apple's
@@ -104,13 +125,14 @@ Rules, in order of how badly they bite:
 4. **Freestanding.** No allocator, no syscalls, no threads. SIMD may not load under the host's
    default wasmtime features, so avoid `-msimd128`.
 
-The metadata format is entirely yours. `../examples/min_max/f8_min_max_metadata_generator` writes min/max because that is what the bundled
-module reads; a bloom filter or a bounding box module would ship its own writer and the engine would
-not change.
+The metadata format is entirely yours, and the two examples here differ only in it: `min_max` writes
+bounds, `min_maxtrix` writes bounds plus a bit matrix per column pair, and each ships the writer for what
+its module reads. A bloom filter or a bounding box module would do the same, and the engine would not
+change.
 
 ## Metadata layout used here ("F8S1")
 
-A sparse map, so metadataing one column of fifty costs one entry:
+A sparse map, so bounding one column of fifty costs one entry:
 
 ```
 0..4    magic "F8S1"
@@ -119,7 +141,23 @@ A sparse map, so metadataing one column of fifty costs one entry:
 ```
 
 A column with no entry has no bounds and is never skipped, which is also how a non-integer column is
-represented. `../examples/min_max/f8_min_max_metadata_generator` leaves out anything it cannot bound.
+represented. Both generators leave out anything they cannot bound.
+
+Then, optionally, a bit matrix per pair of columns spanning fewer than 256 values each - which is the
+half a per-column statistic cannot do:
+
+```
+0..4    magic "F8M1"
+4..8    x column index u32      12..20  x_min i64      28..30  width  u16
+8..12   y column index u32      20..28  y_min i64      30..32  height u16
+32..    ceil(width * height / 8) bytes; bit (dy * width + dx) set = that pair occurs in some row
+```
+
+Given rows `(1,1001) (2,1002) (3,1003)`, `a = 2 AND b = 1003` is inside both columns' bounds but in no
+row. Only the matrix can prove that, and only if it is asked about both terms at once.
+
+Matrices come last so a module that knows only about bounds still works: the entry count fixes where the
+bounds section ends and the rest is simply not read.
 
 ## Checking a file
 
@@ -130,6 +168,11 @@ SELECT key::VARCHAR, octet_length(value) FROM parquet_kv_metadata('enhanced.parq
 SELECT f8_can_skip_equal(
     (SELECT content FROM read_blob('module.wasm')),
     (SELECT content FROM read_blob('metadata.bin')), 0, 42);
+
+-- the same for two terms that must both hold: type 1 is equality, 0 is "no term on this side"
+SELECT f8_can_skip_conj(
+    (SELECT content FROM read_blob('module.wasm')),
+    (SELECT content FROM read_blob('metadata.bin')), 1, 0, 42, 1, 1, 1002);
 
 SET f8_enabled = false;   -- turn skipping off to check an answer is unchanged
 ```
