@@ -2,6 +2,9 @@
 # CARGO_TARGET_DIR, but building either crate by hand still lands here.
 target/
 
+# Where run-demo.sh puts the module, metadata and parquet files it produces.
+build/
+
 # The repo root ignores *.bin, but the metadata fixtures are committed deliberately: the tests read
 # bytes the extension did not produce, which is the whole point of them.
 !test/data/*.bin

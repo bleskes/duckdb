@@ -23,7 +23,7 @@
 //
 // Metadata layout ("F8S1")
 // ----------------------
-// A sparse map from column index to bounds, so a fifty column file with one sketched column carries
+// A sparse map from column index to bounds, so a fifty column file with one bounded column carries
 // one entry rather than fifty:
 //
 //   0..4    magic "F8S1"
@@ -78,7 +78,7 @@ static i64 read_i64(u32 offset) {
 
 // Finds the bounds recorded for a column. Returns 0 when the metadata says nothing about it, in which
 // case *min and *max are untouched.
-static int bounds(u32 metadata_len, u32 column_index, i64 *min, i64 *max) {
+static int get_bounds_for_columns(u32 metadata_len, u32 column_index, i64 *min, i64 *max) {
 	if (metadata_len < HEADER_LEN || read_u32(0) != MAGIC) {
 		return 0;
 	}
@@ -111,7 +111,7 @@ u32 f8_can_skip_equal_i64(u32 column_index, u32 metadata_len, i64 value) {
 		return MUST_READ;
 	}
 	i64 min = 0, max = 0;
-	if (!bounds(metadata_len, column_index, &min, &max)) {
+	if (!get_bounds_for_columns(metadata_len, column_index, &min, &max)) {
 		return MUST_READ;
 	}
 	return (value < min || value > max) ? CAN_SKIP : MUST_READ;
