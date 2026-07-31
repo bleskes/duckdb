@@ -84,21 +84,40 @@ echo "== 6. proof the file was never opened: the scan's own file count =="
 $duckdb -c "EXPLAIN ANALYZE SELECT * FROM $both WHERE id = 102"
 
 echo "== 7. what the bit matrix buys: a pair no row holds, that no bound can rule out =="
-echo "   a.csv is (1,alice,10) (2,bob,50) (3,carol,90). For id = 2 AND cash = 90 both values are in"
-echo "   their own column's range, so bounds - parquet's own included - must read the file to answer."
-echo "   The matrix records which (id, cash) combinations occur, and that one does not."
+echo "   who drank how many beers in which room:"
+echo "     a.csv    id 1 alice  room 10  0     id 2 bob    room 50  1"
+echo "              id 3 carol  room 90  3     id 103 frank room 50  2"
+echo "     b.csv    id 101 dave room 20  2     id 102 erin  room 60  3"
+echo "              id 103 frank room 100 1    id 2 bob     room 60  2"
+echo
+echo "   bob and frank each appear in both files, so no column's range separates them: a holds ids"
+echo "   1..103 and rooms 10..90, b holds ids 2..103 and rooms 20..100. Bounds - parquet's own included -"
+echo "   can rule out almost nothing here. A record of which (id, room_id) pairs occur still can."
 
-# Prints just the scan's file counts for one query against one file.
-file_counts() {
-    # Matching the text rather than stripping the box drawing around it.
-    $duckdb -c "EXPLAIN ANALYZE SELECT * FROM '$1' WHERE $2" 2>&1 |
-        grep -oE "Total Files Read: [0-9]+|Files Skipped: [0-9]+" | paste -sd', ' -
+# The beers summed over one source for one (id, room_id), plus what the scan had to open to answer it.
+# The source is SQL, not a path, so it can be a read_parquet over both files.
+beers() {
+    local source=$1 where=$2
+    local beers files
+    beers=$($duckdb -noheader -list -c "SELECT coalesce(sum(beer_count), 0) FROM $source WHERE $where")
+    files=$($duckdb -c "EXPLAIN ANALYZE SELECT sum(beer_count) FROM $source WHERE $where" 2>&1 |
+        grep -oE "Total Files Read: [0-9]+|Files Skipped: [0-9]+" | paste -sd', ' -)
+    printf "%s beers, %s\n" "$beers" "$files"
 }
 
-echo "   module        query                  result"
-echo "   min_maxtrix   id = 2 AND cash = 90   $(file_counts "$work/a_min_maxtrix_f8.parquet" "id = 2 AND cash = 90")"
-echo "   min_max       id = 2 AND cash = 90   $(file_counts "$work/a_min_max_f8.parquet" "id = 2 AND cash = 90")"
-echo "   min_maxtrix   id = 2 AND cash = 50   $(file_counts "$work/a_min_maxtrix_f8.parquet" "id = 2 AND cash = 50")"
 echo
-echo "   The first two read the same bytes with different modules. The third is a pair that does occur,"
-echo "   so it must be read - a matrix that skipped it would be losing rows, not saving reads."
+row() { printf "   %-12s %-20s %s\n" "$1" "$2" "$(beers "$3" "$4")"; }
+printf "   %-12s %-20s %s\n" module question answer
+both_maxtrix="['$work/a_min_maxtrix_f8.parquet','$work/b_min_maxtrix_f8.parquet']"
+both_minmax="['$work/a_min_max_f8.parquet','$work/b_min_max_f8.parquet']"
+
+row min_maxtrix "carol in room 90"  "read_parquet($both_maxtrix)" "id = 3 AND room_id = 90"
+row min_max     "carol in room 90"  "read_parquet($both_minmax)"  "id = 3 AND room_id = 90"
+row min_maxtrix "bob in room 90"    "read_parquet($both_maxtrix)" "id = 2 AND room_id = 90"
+row min_maxtrix "bob in room 60"    "read_parquet($both_maxtrix)" "id = 2 AND room_id = 60"
+echo
+echo "   Carol is in a and nowhere near b, but b's id and room ranges both cover her, so bounds have to"
+echo "   open both files to answer. The matrix opens one: b holds no (3, 90) pair. Same 3 beers either way."
+echo
+echo "   The third row is a pair in neither file, so both are skipped. The fourth is bob in room 60, which"
+echo "   only b holds - so a is skipped and b is read, the opposite way round."

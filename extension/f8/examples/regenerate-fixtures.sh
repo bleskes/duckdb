@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Regenerates the committed test fixtures in ../test/data, using only the tools in ../tools.
 #
-# a and b are the demo CSVs in this directory, doubling as fixtures. two and wide exist only to drive
-# tests - per-column bounds and sparse metadata - so they live next to the fixtures they produce.
+# Every CSV lives in ../test/data, next to the fixtures it produces. The demo's CSVs are separate, in this
+# directory: it wants data that shows off a bit matrix, while the tests want columns whose ranges are
+# disjoint between the two files, which is what the bounds assertions are built on.
 #
 # Needs a vanilla duckdb on PATH, or $F8_DUCKDB pointing at one - no f8 required to write these files.
 #
@@ -34,7 +35,7 @@ equal_only="$(mktemp -d)/f8_equal_only_module.c"
 
 # Only plain parquet files are committed. The tests embed the module and metadata themselves, which is
 # what exercises the read path against bytes it did not create.
-for csv in "$here/a.csv" "$here/b.csv" "$data/two.csv" "$data/wide.csv" "$data/triple.csv"; do
+for csv in "$data/a.csv" "$data/b.csv" "$data/two.csv" "$data/wide.csv" "$data/triple.csv"; do
     name="$(basename "$csv" .csv)"
     echo
     echo "== $name =="

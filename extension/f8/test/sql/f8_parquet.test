@@ -11,8 +11,8 @@ require parquet
 # extension never produces these bytes, it only consumes them, so this exercises the read path
 # against input it did not create.
 #
-#   plain_a.parquet   id = 1, 2, 3         metadata_a.bin   column 0 over [1, 3], cash over [10, 90]
-#   plain_b.parquet   id = 101, 102, 103   metadata_b.bin   column 0 over [101, 103], cash over [20, 100]
+#   plain_a.parquet   id = 1, 2, 3         metadata_a.bin   id over [1, 3], room_id over [10, 90]
+#   plain_b.parquet   id = 101, 102, 103   metadata_b.bin   id over [101, 103], room_id over [20, 100]
 #
 # Two example modules read those same blobs. m is min_max, which reads the per-column bounds and is what
 # most of this file is about; mx is min_maxtrix, which reads only the bit matrices appended after them.
@@ -546,47 +546,59 @@ DROP MACRO enhanced_pair
 statement ok
 DROP MACRO plain_pair
 
-# The example CSVs carry a second integer column, so metadata_a has a matrix on (id, cash) as well as
-# bounds. a.csv is (1,alice,10) (2,bob,50) (3,carol,90): id = 2 AND cash = 90 is inside both columns'
-# ranges and in no row, which is the case only a joint record can answer.
+# The example CSVs record who drank how many beers in which room, so metadata_a carries matrices over the
+# integer column pairs as well as bounds. a.csv is (1,alice,10,0) (2,bob,50,1) (3,carol,90,3), so
+# id = 2 AND room_id = 90 - bob in a room he was never in - is inside both columns' ranges and in no row,
+# which is the case only a joint record can answer.
 statement ok
-COPY (FROM 'test/data/plain_a.parquet') TO '__TEST_DIR__/cash_maxtrix.parquet'
+COPY (FROM 'test/data/plain_a.parquet') TO '__TEST_DIR__/room_maxtrix.parquet'
     (FORMAT parquet, KV_METADATA {f8_module: getvariable('mx'), f8_metadata: getvariable('sa')});
 
 # Same bytes, same metadata, read by the module that knows only about bounds.
 statement ok
-COPY (FROM 'test/data/plain_a.parquet') TO '__TEST_DIR__/cash_minmax.parquet'
+COPY (FROM 'test/data/plain_a.parquet') TO '__TEST_DIR__/room_minmax.parquet'
     (FORMAT parquet, KV_METADATA {f8_module: getvariable('m'), f8_metadata: getvariable('sa')});
 
 query II
-EXPLAIN ANALYZE SELECT * FROM '__TEST_DIR__/cash_maxtrix.parquet' WHERE id = 2 AND cash = 90
+EXPLAIN ANALYZE SELECT * FROM '__TEST_DIR__/room_maxtrix.parquet' WHERE id = 2 AND room_id = 90
 ----
 analyzed_plan	<REGEX>:[\s\S]*Total Files Read: 0[\s\S]*Files Skipped: 1[\s\S]*
 
 # The bounds-only module cannot prove it and reads the file - which is also the check that it is not
 # tripped up by the matrix bytes appended after the entries it does understand.
 query II
-EXPLAIN ANALYZE SELECT * FROM '__TEST_DIR__/cash_minmax.parquet' WHERE id = 2 AND cash = 90
+EXPLAIN ANALYZE SELECT * FROM '__TEST_DIR__/room_minmax.parquet' WHERE id = 2 AND room_id = 90
 ----
 analyzed_plan	<REGEX>:[\s\S]*Total Files Read: 1[\s\S]*
 
 # A pair that does occur must be read by both, or the matrix would be losing rows.
 query II
 SELECT
-    (SELECT count(*) FROM '__TEST_DIR__/cash_maxtrix.parquet' WHERE id = 2 AND cash = 50),
-    (SELECT count(*) FROM '__TEST_DIR__/cash_minmax.parquet' WHERE id = 2 AND cash = 50)
+    (SELECT count(*) FROM '__TEST_DIR__/room_maxtrix.parquet' WHERE id = 2 AND room_id = 50),
+    (SELECT count(*) FROM '__TEST_DIR__/room_minmax.parquet' WHERE id = 2 AND room_id = 50)
 ----
 1	1
 
+# An aggregate over a skipped file still has to be right: bob drank 1 beer in room 50 and was never in
+# room 90, so the sums match the plain file whether the file was opened or not.
+query IIII
+SELECT
+    (SELECT sum(beer_count) FROM '__TEST_DIR__/room_maxtrix.parquet' WHERE id = 2 AND room_id = 50),
+    (SELECT sum(beer_count) FROM 'test/data/plain_a.parquet' WHERE id = 2 AND room_id = 50),
+    (SELECT coalesce(sum(beer_count), 0) FROM '__TEST_DIR__/room_maxtrix.parquet' WHERE id = 2 AND room_id = 90),
+    (SELECT coalesce(sum(beer_count), 0) FROM 'test/data/plain_a.parquet' WHERE id = 2 AND room_id = 90)
+----
+1	1	0	0
+
 # Every combination of the two columns, against the plain file, with skipping on and then off.
 statement ok
-CREATE TABLE cash_combos AS SELECT i AS idv, c AS cashv
-    FROM (SELECT unnest([0,1,2,3,4]) AS i), (SELECT unnest([0,10,50,90,100]) AS c);
+CREATE TABLE room_combos AS SELECT i AS idv, r AS roomv
+    FROM (SELECT unnest([0,1,2,3,4]) AS i), (SELECT unnest([0,10,50,90,100]) AS r);
 
 query I
-SELECT count(*) FROM cash_combos WHERE
-    (SELECT count(*) FROM '__TEST_DIR__/cash_maxtrix.parquet' WHERE id = idv AND cash = cashv) <>
-    (SELECT count(*) FROM 'test/data/plain_a.parquet' WHERE id = idv AND cash = cashv)
+SELECT count(*) FROM room_combos WHERE
+    (SELECT count(*) FROM '__TEST_DIR__/room_maxtrix.parquet' WHERE id = idv AND room_id = roomv) <>
+    (SELECT count(*) FROM 'test/data/plain_a.parquet' WHERE id = idv AND room_id = roomv)
 ----
 0
 
@@ -594,9 +606,9 @@ statement ok
 SET f8_enabled = false
 
 query I
-SELECT count(*) FROM cash_combos WHERE
-    (SELECT count(*) FROM '__TEST_DIR__/cash_maxtrix.parquet' WHERE id = idv AND cash = cashv) <>
-    (SELECT count(*) FROM 'test/data/plain_a.parquet' WHERE id = idv AND cash = cashv)
+SELECT count(*) FROM room_combos WHERE
+    (SELECT count(*) FROM '__TEST_DIR__/room_maxtrix.parquet' WHERE id = idv AND room_id = roomv) <>
+    (SELECT count(*) FROM 'test/data/plain_a.parquet' WHERE id = idv AND room_id = roomv)
 ----
 0
 
