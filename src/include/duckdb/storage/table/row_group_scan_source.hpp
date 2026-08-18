@@ -36,12 +36,11 @@ struct TableScanBindData;
 //! row group was handed out, FINISHED means the scan is done, BLOCKED means the scan is parked (see Blocked())
 struct RowGroupScanResult {
 	AsyncResultType type = AsyncResultType::FINISHED;
-	//! The row group to scan - only set for HAVE_MORE_OUTPUT. Note: RowGroup is spelled duckdb::RowGroup throughout
-	//! this struct so that the RowGroup() factory below does not clash with the RowGroup type (GCC -Wchanges-meaning)
-	optional_ptr<SegmentNode<duckdb::RowGroup>> row_group;
+	//! The row group to scan - only set for HAVE_MORE_OUTPUT
+	optional_ptr<SegmentNode<RowGroup>> row_group;
 
-	//! Hand out a row group. Passing a nullptr row group is equivalent to Finished()
-	DUCKDB_API static RowGroupScanResult RowGroup(optional_ptr<SegmentNode<duckdb::RowGroup>> row_group);
+	//! Hand out a row group to scan
+	DUCKDB_API static RowGroupScanResult WithRowGroup(SegmentNode<RowGroup> &row_group);
 	DUCKDB_API static RowGroupScanResult Finished();
 	//! Park the scan. The source must have stashed the input's InterruptState and must resume the scan by calling
 	//! InterruptState::Callback once it can hand out row groups again. Only allowed when the input carries an

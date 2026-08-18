@@ -219,7 +219,7 @@ RowGroupScanResult RowGroupReorderer::Next(RowGroupScanSourceInput &input) {
 	if (index >= ordered_row_groups.size()) {
 		return RowGroupScanResult::Finished();
 	}
-	return RowGroupScanResult::RowGroup(ordered_row_groups[index].get());
+	return RowGroupScanResult::WithRowGroup(ordered_row_groups[index].get());
 }
 
 Value RowGroupReorderer::RetrieveStat(const BaseStatistics &stats, OrderByStatistics order_by,

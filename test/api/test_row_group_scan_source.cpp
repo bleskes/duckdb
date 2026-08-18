@@ -66,7 +66,7 @@ public:
 			return RowGroupScanResult::Finished();
 		}
 		stats.row_groups_handed_out++;
-		return RowGroupScanResult::RowGroup(row_groups[index].get());
+		return RowGroupScanResult::WithRowGroup(row_groups[index].get());
 	}
 
 private:

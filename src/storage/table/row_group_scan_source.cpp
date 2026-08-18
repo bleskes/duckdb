@@ -9,13 +9,10 @@ namespace duckdb {
 //===--------------------------------------------------------------------===//
 // RowGroupScanResult
 //===--------------------------------------------------------------------===//
-RowGroupScanResult RowGroupScanResult::RowGroup(optional_ptr<SegmentNode<duckdb::RowGroup>> row_group) {
-	if (!row_group) {
-		return Finished();
-	}
+RowGroupScanResult RowGroupScanResult::WithRowGroup(SegmentNode<RowGroup> &row_group) {
 	RowGroupScanResult result;
 	result.type = AsyncResultType::HAVE_MORE_OUTPUT;
-	result.row_group = row_group;
+	result.row_group = &row_group;
 	return result;
 }
 
@@ -83,7 +80,7 @@ public:
 			finished = true;
 			return RowGroupScanResult::Finished();
 		}
-		return RowGroupScanResult::RowGroup(cursor);
+		return RowGroupScanResult::WithRowGroup(*cursor);
 	}
 
 private:
