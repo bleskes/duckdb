@@ -377,14 +377,17 @@ void LocalStorage::Scan(CollectionScanState &state, const vector<StorageIndex> &
 	state.Scan(transaction, result);
 }
 
-void LocalStorage::InitializeParallelScan(DataTable &table, ParallelCollectionScanState &state) {
+void LocalStorage::InitializeParallelScan(ClientContext &context, DataTable &table,
+                                          ParallelCollectionScanState &state) {
 	auto storage = table_manager.GetStorage(table);
 	if (!storage) {
 		state.max_row = 0;
-		state.vector_index = 0;
-		state.current_row_group = nullptr;
+		state.verify_row_group = nullptr;
+		state.verify_vector_index = 0;
+		// there is no transaction-local storage to scan - drop the source, if any, so that we never pull from it
+		state.row_group_source.reset();
 	} else {
-		storage->GetCollection().InitializeParallelScan(state);
+		storage->GetCollection().InitializeParallelScan(context, state);
 	}
 }
 
@@ -396,13 +399,15 @@ OptimisticWriteCollection &LocalTableStorage::GetPrimaryCollection() {
 	return *row_groups;
 }
 
-bool LocalStorage::NextParallelScan(ClientContext &context, DataTable &table, ParallelCollectionScanState &state,
-                                    CollectionScanState &scan_state) {
+RowGroupScanAssignment LocalStorage::NextParallelScan(ClientContext &context, DataTable &table,
+                                                      ParallelCollectionScanState &state,
+                                                      CollectionScanState &scan_state,
+                                                      optional_ptr<const InterruptState> interrupt_state) {
 	auto storage = table_manager.GetStorage(table);
 	if (!storage) {
-		return false;
+		return RowGroupScanAssignment::Finished();
 	}
-	return storage->GetCollection().NextParallelScan(context, state, scan_state);
+	return storage->GetCollection().NextParallelScan(context, state, scan_state, interrupt_state);
 }
 
 void LocalStorage::InitializeAppend(LocalAppendState &state, DataTable &table) {

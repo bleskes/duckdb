@@ -15,6 +15,7 @@
 #include "duckdb/storage/storage_index.hpp"
 #include "duckdb/common/enums/index_removal_type.hpp"
 #include "duckdb/common/enums/row_group_append_mode.hpp"
+#include "duckdb/storage/table/row_group_scan_source.hpp"
 
 namespace duckdb {
 
@@ -78,8 +79,12 @@ public:
 	static bool InitializeScanInRowGroup(ClientContext &context, CollectionScanState &state,
 	                                     RowGroupCollection &collection, SegmentNode<RowGroup> &row_group,
 	                                     idx_t vector_index, idx_t max_row);
-	void InitializeParallelScan(ParallelCollectionScanState &state);
-	bool NextParallelScan(ClientContext &context, ParallelCollectionScanState &state, CollectionScanState &scan_state);
+	void InitializeParallelScan(ClientContext &context, ParallelCollectionScanState &state);
+	//! Assign the next row group to the given scan state. Returns BLOCKED if the row group source parked the scan - in
+	//! that case the caller must suspend the scan (the source resumes it via the interrupt_state it was handed)
+	RowGroupScanAssignment NextParallelScan(ClientContext &context, ParallelCollectionScanState &state,
+	                                        CollectionScanState &scan_state,
+	                                        optional_ptr<const InterruptState> interrupt_state);
 
 	RowGroupIterationHelper Chunks(DuckTransaction &transaction);
 	RowGroupIterationHelper Chunks(DuckTransaction &transaction, const vector<StorageIndex> &column_ids);

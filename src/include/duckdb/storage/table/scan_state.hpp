@@ -12,6 +12,7 @@
 #include "duckdb/storage/buffer/buffer_handle.hpp"
 #include "duckdb/storage/storage_lock.hpp"
 #include "duckdb/storage/table/row_group_reorderer.hpp"
+#include "duckdb/storage/table/row_group_scan_source.hpp"
 #include "duckdb/common/random_engine.hpp"
 #include "duckdb/storage/table/segment_lock.hpp"
 #include "duckdb/common/types/data_chunk.hpp"
@@ -35,6 +36,7 @@ class ValiditySegment;
 class TableFilterSet;
 class ColumnData;
 class DuckTransaction;
+class InterruptState;
 class RowGroupSegmentTree;
 class TableFilter;
 struct AdaptiveFilterState;
@@ -249,8 +251,12 @@ public:
 	//! The amount of tuples considered by a scan, before applying filters
 	idx_t rows_scanned = 0;
 
-	//! Optional state for custom row group ordering
-	unique_ptr<RowGroupReorderer> reorderer;
+	//! The source that hands out the row groups to scan. Either set before initializing the scan - in which case it
+	//! is initialized by the scan - or inherited from the parallel scan state that assigns row groups to this state,
+	//! in which case it has already been initialized. Defaults to handing out all row groups in storage order
+	shared_ptr<RowGroupScanSource> row_group_source;
+	//! The context of the query that is scanning (if any) - passed to the row group source
+	optional_ptr<ClientContext> context;
 
 public:
 	void Initialize(const QueryContext &context, const vector<LogicalType> &types);
@@ -258,9 +264,10 @@ public:
 	ScanFilterInfo &GetFilterInfo();
 	ScanSamplingInfo &GetSamplingInfo();
 	TableScanOptions &GetOptions();
-	optional_ptr<SegmentNode<RowGroup>> GetNextRowGroup(SegmentNode<RowGroup> &row_group) const;
+	//! Pull the next row group out of the row group source. This blocks the calling thread if the source blocks,
+	//! since the sequential scan path cannot suspend
+	optional_ptr<SegmentNode<RowGroup>> GetNextRowGroup();
 	optional_ptr<SegmentNode<RowGroup>> GetNextRowGroup(SegmentLock &l, SegmentNode<RowGroup> &row_group) const;
-	optional_ptr<SegmentNode<RowGroup>> GetRootSegment() const;
 	bool Scan(DuckTransaction &transaction, DataChunk &result);
 	bool Scan(DataChunk &result, TableScanType type, optional_ptr<SegmentLock> l = nullptr);
 
@@ -325,22 +332,27 @@ private:
 
 struct ParallelCollectionScanState {
 	ParallelCollectionScanState();
-	optional_ptr<SegmentNode<RowGroup>> GetRootSegment(RowGroupSegmentTree &row_groups) const;
-	optional_ptr<SegmentNode<RowGroup>> GetNextRowGroup(RowGroupSegmentTree &row_groups,
-	                                                    SegmentNode<RowGroup> &row_group) const;
+	//! Pull the next row group out of the row group source. Can be called concurrently: the source synchronizes
+	//! itself. interrupt_state is the scanning task's interrupt state, so the source can park the scan (only set when
+	//! the scan can be suspended)
+	RowGroupScanResult NextRowGroup(optional_ptr<ClientContext> context,
+	                                optional_ptr<const InterruptState> interrupt_state) const;
 
 	//! The row group collection we are scanning
 	RowGroupCollection *collection;
 	shared_ptr<RowGroupSegmentTree> row_groups;
-	optional_ptr<SegmentNode<RowGroup>> current_row_group;
-	idx_t vector_index;
 	idx_t max_row;
-	idx_t batch_index;
+	atomic<idx_t> batch_index;
 	atomic<idx_t> processed_rows;
-	mutex lock;
 
-	//! Optional state for custom row group ordering
-	unique_ptr<RowGroupReorderer> reorderer;
+	//! The source that hands out the row groups to scan. Set before initializing the scan, defaults to handing out
+	//! all row groups in storage order. Shared with the scan states of all threads scanning this collection
+	shared_ptr<RowGroupScanSource> row_group_source;
+
+	//! State used to hand out a single vector at a time, only used when verify_parallelism is enabled
+	mutex verify_lock;
+	optional_ptr<SegmentNode<RowGroup>> verify_row_group;
+	idx_t verify_vector_index;
 };
 
 struct ParallelTableScanState {

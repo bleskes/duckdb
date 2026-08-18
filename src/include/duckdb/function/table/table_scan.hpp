@@ -30,6 +30,9 @@ struct TableScanBindData : public TableFunctionData {
 	bool is_create_index;
 	//! In what order to scan the row groups
 	unique_ptr<RowGroupOrderOptions> order_options;
+	//! Adapters that wrap the row group sources of this scan, in the order in which they were added.
+	//! Attached by optimizer extensions through LogicalGet::AddRowGroupScanAdapter
+	vector<shared_ptr<RowGroupScanAdapter>> row_group_scan_adapters;
 
 public:
 	bool Equals(const FunctionData &other_p) const override {
@@ -42,6 +45,7 @@ public:
 		bind_data->is_create_index = is_create_index;
 		bind_data->column_ids = column_ids;
 		bind_data->order_options = order_options ? make_uniq<RowGroupOrderOptions>(*order_options) : nullptr;
+		bind_data->row_group_scan_adapters = row_group_scan_adapters;
 		return std::move(bind_data);
 	}
 };

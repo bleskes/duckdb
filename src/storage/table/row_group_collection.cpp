@@ -230,16 +230,32 @@ void RowGroupCollection::Verify() {
 //===--------------------------------------------------------------------===//
 // Scan
 //===--------------------------------------------------------------------===//
+namespace {
+
+//! Set up the source that hands out the row groups of this scan. This is called by the scan state that creates the
+//! source; scan states that inherit a source from the parallel scan state assigning their row groups receive a source
+//! that has already been initialized
+void InitializeRowGroupScanSource(RowGroupCollection &collection, shared_ptr<RowGroupScanSource> &source,
+                                  shared_ptr<RowGroupSegmentTree> row_groups, optional_ptr<ClientContext> context) {
+	if (!source) {
+		source = RowGroupScanSources::Storage();
+	}
+	RowGroupScanSourceInitInput input(collection, std::move(row_groups), context);
+	source->Initialize(input);
+}
+
+} // namespace
+
 void RowGroupCollection::InitializeScan(const QueryContext &context, CollectionScanState &state,
                                         const vector<StorageIndex> &column_ids,
                                         optional_ptr<TableFilterSet> table_filters) {
 	state.row_groups = GetRowGroups();
-	auto row_group = state.GetRootSegment();
-	D_ASSERT(row_group);
 	state.max_row = state.row_groups->GetBaseRowId() + total_rows;
 	state.Initialize(context, GetTypes());
+	InitializeRowGroupScanSource(*this, state.row_group_source, state.row_groups, context.GetClientContext());
+	auto row_group = state.GetNextRowGroup();
 	while (row_group && !row_group->GetNode().InitializeScan(state, *row_group)) {
-		row_group = state.GetNextRowGroup(*row_group);
+		row_group = state.GetNextRowGroup();
 	}
 }
 
@@ -274,72 +290,87 @@ bool RowGroupCollection::InitializeScanInRowGroup(ClientContext &context, Collec
 	return row_group.GetNode().InitializeScanWithOffset(state, row_group, vector_index);
 }
 
-void RowGroupCollection::InitializeParallelScan(ParallelCollectionScanState &state) {
+void RowGroupCollection::InitializeParallelScan(ClientContext &context, ParallelCollectionScanState &state) {
 	state.collection = this;
 	state.row_groups = GetRowGroups();
-	state.current_row_group = state.GetRootSegment(*state.row_groups);
-	state.vector_index = 0;
+	// note that we do not pull the first row group here: the row group source might block, and we cannot suspend
+	// during initialization - row groups are pulled by NextParallelScan
+	InitializeRowGroupScanSource(*this, state.row_group_source, state.row_groups, context);
+	state.verify_row_group = nullptr;
+	state.verify_vector_index = 0;
 	state.max_row = state.row_groups->GetBaseRowId() + total_rows;
 	state.batch_index = 0;
 	state.processed_rows = 0;
 }
 
-bool RowGroupCollection::NextParallelScan(ClientContext &context, ParallelCollectionScanState &state,
-                                          CollectionScanState &scan_state) {
+RowGroupScanAssignment RowGroupCollection::NextParallelScan(ClientContext &context, ParallelCollectionScanState &state,
+                                                            CollectionScanState &scan_state,
+                                                            optional_ptr<const InterruptState> interrupt_state) {
 	AssignSharedPointer(scan_state.row_groups, state.row_groups);
+	const auto verify_parallelism = ClientConfig::GetConfig(context).verify_parallelism;
 	while (true) {
-		idx_t vector_index;
+		idx_t vector_index = 0;
 		idx_t max_row;
-		optional_ptr<RowGroupCollection> collection;
 		optional_ptr<SegmentNode<RowGroup>> row_group;
-		{
-			// select the next row group to scan from the parallel state
-			lock_guard<mutex> l(state.lock);
-			if (!state.current_row_group) {
+		if (verify_parallelism) {
+			// hand out a single vector at a time, so we need to keep the current row group around
+			lock_guard<mutex> l(state.verify_lock);
+			if (!state.verify_row_group) {
+				auto result = state.NextRowGroup(context, interrupt_state);
+				if (result.type == AsyncResultType::BLOCKED) {
+					return RowGroupScanAssignment::Blocked();
+				}
+				if (result.type == AsyncResultType::FINISHED || result.row_group->GetCount() == 0) {
+					break;
+				}
+				state.verify_row_group = result.row_group;
+				state.verify_vector_index = 0;
+			}
+			row_group = state.verify_row_group;
+			const auto row_group_count = row_group->GetCount();
+			vector_index = state.verify_vector_index;
+			D_ASSERT(vector_index * STANDARD_VECTOR_SIZE < row_group_count);
+			max_row =
+			    row_group->GetRowStart() + MinValue<idx_t>(row_group_count, STANDARD_VECTOR_SIZE * (vector_index + 1));
+			state.verify_vector_index++;
+			if (state.verify_vector_index * STANDARD_VECTOR_SIZE >= row_group_count) {
+				state.verify_row_group = nullptr;
+				state.verify_vector_index = 0;
+			}
+		} else {
+			// pull the next row group out of the row group source - the source synchronizes itself, so we can pull
+			// without holding a lock
+			auto result = state.NextRowGroup(context, interrupt_state);
+			if (result.type == AsyncResultType::BLOCKED) {
+				// the source parked the scan - the caller must suspend it (the source resumes it later)
+				return RowGroupScanAssignment::Blocked();
+			}
+			if (result.type == AsyncResultType::FINISHED || result.row_group->GetCount() == 0) {
 				// no more data left to scan
 				break;
 			}
-			auto &current_row_group = state.current_row_group->GetNode();
-			if (current_row_group.count == 0) {
-				break;
-			}
-			auto row_start = state.current_row_group->GetRowStart();
-			collection = state.collection;
-			row_group = state.current_row_group;
-			if (ClientConfig::GetConfig(context).verify_parallelism) {
-				vector_index = state.vector_index;
-				max_row = row_start + MinValue<idx_t>(current_row_group.count,
-				                                      STANDARD_VECTOR_SIZE * state.vector_index + STANDARD_VECTOR_SIZE);
-				D_ASSERT(vector_index * STANDARD_VECTOR_SIZE < current_row_group.count);
-				state.vector_index++;
-				if (state.vector_index * STANDARD_VECTOR_SIZE >= current_row_group.count) {
-					state.current_row_group = state.GetNextRowGroup(*state.row_groups, *row_group).get();
-					state.vector_index = 0;
-				}
-			} else {
-				state.processed_rows += current_row_group.count;
-				vector_index = 0;
-				max_row = row_start + current_row_group.count;
-				state.current_row_group = state.GetNextRowGroup(*state.row_groups, *row_group).get();
-			}
-			max_row = MinValue<idx_t>(max_row, state.max_row);
-			scan_state.batch_index = ++state.batch_index;
+			row_group = result.row_group;
+			state.processed_rows += row_group->GetCount();
+			max_row = row_group->GetRowEnd();
 		}
-		D_ASSERT(collection);
+		max_row = MinValue<idx_t>(max_row, state.max_row);
+		// the batch index is assigned in the order in which the row groups are handed out
+		scan_state.batch_index = ++state.batch_index;
+
+		D_ASSERT(state.collection);
 		D_ASSERT(row_group);
 
 		// initialize the scan for this row group
 		bool need_to_scan =
-		    InitializeScanInRowGroup(context, scan_state, *collection, *row_group, vector_index, max_row);
+		    InitializeScanInRowGroup(context, scan_state, *state.collection, *row_group, vector_index, max_row);
 		if (!need_to_scan) {
 			// skip this row group
 			continue;
 		}
-		return true;
+		return RowGroupScanAssignment::RowGroupAssigned(row_group->GetCount());
 	}
-	lock_guard<mutex> l(state.lock);
 	scan_state.batch_index = state.batch_index;
-	return false;
+	return RowGroupScanAssignment::Finished();
 }
 
 //===--------------------------------------------------------------------===//

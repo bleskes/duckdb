@@ -132,9 +132,10 @@ public:
 	//! Scan
 	void Scan(CollectionScanState &state, const vector<StorageIndex> &column_ids, DataChunk &result);
 
-	void InitializeParallelScan(DataTable &table, ParallelCollectionScanState &state);
-	bool NextParallelScan(ClientContext &context, DataTable &table, ParallelCollectionScanState &state,
-	                      CollectionScanState &scan_state);
+	void InitializeParallelScan(ClientContext &context, DataTable &table, ParallelCollectionScanState &state);
+	RowGroupScanAssignment NextParallelScan(ClientContext &context, DataTable &table,
+	                                        ParallelCollectionScanState &state, CollectionScanState &scan_state,
+	                                        optional_ptr<const InterruptState> interrupt_state);
 
 	//! Begin appending to the local storage
 	void InitializeAppend(LocalAppendState &state, DataTable &table);

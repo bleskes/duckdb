@@ -84,6 +84,9 @@ public:
 	idx_t EstimateCardinality(ClientContext &context) override;
 	bool TryGetStorageIndex(const ColumnIndex &column_index, StorageIndex &out_index) const;
 	void SetScanOrder(unique_ptr<RowGroupOrderOptions> options);
+	//! Let an extension adapt the row group scanning logic of this scan. Throws if the table function does not scan
+	//! row groups
+	void AddRowGroupScanAdapter(shared_ptr<RowGroupScanAdapter> adapter);
 
 	vector<idx_t> GetTableIndex() const override;
 	//! Skips the serialization check in VerifyPlan

@@ -166,6 +166,11 @@ SourceResultType PhysicalTableScan::GetDataInternal(ExecutionContext &context, D
 
 	if (function.function) {
 		data.async_result = AsyncResultType::IMPLICIT;
+		// hand the function the interrupt state so it can park itself (return a taskless BLOCKED result) and be
+		// resumed later via a callback (backported from main)
+		if (input.interrupt_state.CanCallback()) {
+			data.interrupt_state = &input.interrupt_state;
+		}
 
 		const auto initial_async_result = data.async_result.GetResultType();
 		const auto execution_strategy = g_state.physical_table_scan_execution_strategy;
@@ -185,7 +190,11 @@ SourceResultType PhysicalTableScan::GetDataInternal(ExecutionContext &context, D
 		// Handle results
 		switch (output_async_result) {
 		case AsyncResultType::BLOCKED: {
-			D_ASSERT(data.async_result.HasTasks());
+			if (!data.async_result.HasTasks()) {
+				// the function parked itself - it is resumed via the interrupt state we handed it (backported from
+				// main)
+				return SourceResultType::BLOCKED;
+			}
 			auto guard = g_state.Lock();
 			if (g_state.CanBlock(guard)) {
 				data.async_result.ScheduleTasks(input.interrupt_state, context.pipeline->executor);

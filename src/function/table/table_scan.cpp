@@ -14,6 +14,7 @@
 #include "duckdb/main/attached_database.hpp"
 #include "duckdb/main/client_config.hpp"
 #include "duckdb/main/database.hpp"
+#include "duckdb/parallel/interrupt.hpp"
 #include "duckdb/planner/expression.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
@@ -33,6 +34,30 @@
 #include "duckdb/transaction/duck_transaction_manager.hpp"
 
 namespace duckdb {
+
+//! Create the source that hands out the row groups of a duck table scan. The source that DuckDB would use by itself -
+//! storage order, or the order that the optimizer pushed into the scan - is wrapped by the adapters that extensions
+//! attached to this scan, so that they sit between the threads of the scan and the row groups that they read
+static shared_ptr<RowGroupScanSource> CreateRowGroupScanSource(ClientContext &context, TableFunctionInitInput &input,
+                                                               const vector<StorageIndex> &column_ids,
+                                                               TransactionData transaction, bool parallel) {
+	auto &bind_data = input.bind_data->Cast<TableScanBindData>();
+	auto source = bind_data.order_options ? RowGroupScanSources::Reordered(*bind_data.order_options, transaction)
+	                                      : RowGroupScanSources::Storage();
+	if (bind_data.row_group_scan_adapters.empty()) {
+		return std::move(source);
+	}
+
+	RowGroupScanSourceInfo info(context, bind_data, input, parallel, column_ids);
+	for (auto &adapter : bind_data.row_group_scan_adapters) {
+		source = adapter->Wrap(info, std::move(source));
+		if (!source) {
+			throw InternalException("RowGroupScanAdapter \"%s\" did not return a row group scan source",
+			                        adapter->Name());
+		}
+	}
+	return std::move(source);
+}
 
 struct TableScanLocalState : public LocalTableFunctionState {
 	//! The current position in the scan.
@@ -292,19 +317,15 @@ public:
 			storage_ids.push_back(bind_data.table.GetStorageIndex(col));
 		}
 
-		if (bind_data.order_options) {
-			l_state->scan_state.table_state.reorderer =
-			    make_uniq<RowGroupReorderer>(*bind_data.order_options, TransactionData(tx));
-			l_state->scan_state.local_state.reorderer =
-			    make_uniq<RowGroupReorderer>(*bind_data.order_options, TransactionData(tx));
-		}
+		// the row group sources are shared with - and were initialized by - the global scan state, so that every row
+		// group of this scan is handed out by a single source
+		l_state->scan_state.table_state.row_group_source = state.scan_state.row_group_source;
+		l_state->scan_state.local_state.row_group_source = state.local_state.row_group_source;
 
 		l_state->scan_state.Initialize(std::move(storage_ids), context.client, input.filters, input.sample_options);
 
-		l_state->rows_in_current_row_group = storage.NextParallelScan(context.client, state, l_state->scan_state);
-		if (l_state->rows_in_current_row_group > 0) {
-			l_state->row_groups_scanned++;
-		}
+		// note that we do not assign a row group here: the row group source might block, and we cannot suspend the
+		// pipeline during initialization - the first row group is assigned by the first TableScanFunc call
 		if (input.CanRemoveFilterColumns()) {
 			l_state->all_columns.Initialize(context.client, scanned_types);
 		}
@@ -331,7 +352,21 @@ public:
 				return;
 			}
 
-			l_state.rows_in_current_row_group = storage.NextParallelScan(context, state, l_state.scan_state);
+			// only hand the source an interrupt state - and thus allow it to park the scan - when this scan can be
+			// suspended (TASK_EXECUTOR mode and the task can receive a callback). Otherwise the source must not block
+			optional_ptr<const InterruptState> interrupt_state;
+			if (data_p.results_execution_mode == AsyncResultsExecutionMode::TASK_EXECUTOR && data_p.interrupt_state &&
+			    data_p.interrupt_state->CanCallback()) {
+				interrupt_state = data_p.interrupt_state;
+			}
+			auto assignment = storage.NextParallelScan(context, state, l_state.scan_state, interrupt_state);
+			if (assignment.IsBlocked()) {
+				// the source parked the scan (it copied our interrupt state and will call Callback later). Return a
+				// taskless BLOCKED result so the pipeline task is suspended until then
+				data_p.async_result = AsyncResultType::BLOCKED;
+				return;
+			}
+			l_state.rows_in_current_row_group = assignment.rows;
 			if (l_state.rows_in_current_row_group > 0) {
 				l_state.row_groups_scanned++;
 			}
@@ -406,11 +441,18 @@ static unique_ptr<LocalTableFunctionState> TableScanInitLocal(ExecutionContext &
 unique_ptr<GlobalTableFunctionState> DuckTableScanInitGlobal(ClientContext &context, TableFunctionInitInput &input,
                                                              DataTable &storage, const TableScanBindData &bind_data) {
 	auto g_state = make_uniq<DuckTableScanState>(context, input.bind_data.get());
-	if (bind_data.order_options) {
-		auto transaction = TransactionData(DuckTransaction::Get(context, storage.GetAttached()));
-		g_state->state.scan_state.reorderer = make_uniq<RowGroupReorderer>(*bind_data.order_options, transaction);
-		g_state->state.local_state.reorderer = make_uniq<RowGroupReorderer>(*bind_data.order_options, transaction);
+
+	vector<StorageIndex> storage_ids;
+	for (auto &col : input.column_indexes) {
+		storage_ids.push_back(bind_data.table.GetStorageIndex(col));
 	}
+	auto transaction = TransactionData(DuckTransaction::Get(context, storage.GetAttached()));
+	// one source per collection - the persistent storage of the table and its transaction-local storage. Each source
+	// is told which collection it operates on when it is initialized
+	g_state->state.scan_state.row_group_source =
+	    CreateRowGroupScanSource(context, input, storage_ids, transaction, true);
+	g_state->state.local_state.row_group_source =
+	    CreateRowGroupScanSource(context, input, storage_ids, transaction, true);
 
 	storage.InitializeParallelScan(context, g_state->state, input.column_indexes);
 	if (!input.CanRemoveFilterColumns()) {
@@ -908,6 +950,11 @@ void SetScanOrder(unique_ptr<RowGroupOrderOptions> order_options, optional_ptr<F
 	bind_data.order_options = std::move(order_options);
 }
 
+void AddRowGroupScanAdapter(shared_ptr<RowGroupScanAdapter> adapter, optional_ptr<FunctionData> bind_data_p) {
+	auto &bind_data = bind_data_p->Cast<TableScanBindData>();
+	bind_data.row_group_scan_adapters.push_back(std::move(adapter));
+}
+
 TableFunction TableScanFunction::GetFunction() {
 	TableFunction scan_function("seq_scan", {}, TableScanFunc);
 	scan_function.init_local = TableScanInitLocal;
@@ -933,6 +980,7 @@ TableFunction TableScanFunction::GetFunction() {
 	scan_function.get_virtual_columns = TableScanGetVirtualColumns;
 	scan_function.get_row_id_columns = TableScanGetRowIdColumns;
 	scan_function.set_scan_order = SetScanOrder;
+	scan_function.add_row_group_scan_adapter = AddRowGroupScanAdapter;
 	scan_function.supports_pushdown_extract = TableSupportsPushdownExtract;
 	return scan_function;
 }

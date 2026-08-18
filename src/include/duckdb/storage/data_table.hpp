@@ -93,7 +93,11 @@ public:
 	idx_t MaxThreads(ClientContext &context) const;
 	void InitializeParallelScan(ClientContext &context, ParallelTableScanState &state,
 	                            const vector<ColumnIndex> &column_indexes);
-	idx_t NextParallelScan(ClientContext &context, ParallelTableScanState &state, TableScanState &scan_state);
+	//! Assign the next row group to scan to the given scan state. If the row group source parked the scan, the caller
+	//! must suspend it (the source resumes it via the interrupt_state it was handed)
+	RowGroupScanAssignment NextParallelScan(ClientContext &context, ParallelTableScanState &state,
+	                                        TableScanState &scan_state,
+	                                        optional_ptr<const InterruptState> interrupt_state);
 
 	//! Scans up to STANDARD_VECTOR_SIZE elements from the table starting
 	//! from offset and store them in result. Offset is incremented with how many

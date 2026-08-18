@@ -25,9 +25,9 @@ TableFunction::TableFunction(string name, const vector<LogicalType> &arguments, 
       table_scan_progress(nullptr), get_partition_data(nullptr), get_bind_info(nullptr), type_pushdown(nullptr),
       get_multi_file_reader(nullptr), supports_pushdown_type(nullptr), supports_pushdown_extract(nullptr),
       get_partition_info(nullptr), get_partition_stats(nullptr), get_virtual_columns(nullptr),
-      get_row_id_columns(nullptr), set_scan_order(nullptr), serialize(nullptr), deserialize(nullptr),
-      projection_pushdown(false), filter_pushdown(false), filter_prune(false), sampling_pushdown(false),
-      late_materialization(false) {
+      get_row_id_columns(nullptr), set_scan_order(nullptr), add_row_group_scan_adapter(nullptr), serialize(nullptr),
+      deserialize(nullptr), projection_pushdown(false), filter_pushdown(false), filter_prune(false),
+      sampling_pushdown(false), late_materialization(false) {
 }
 
 TableFunction::TableFunction(string name, const vector<LogicalType> &arguments, std::nullptr_t function_,
@@ -41,9 +41,9 @@ TableFunction::TableFunction(string name, const vector<LogicalType> &arguments, 
       table_scan_progress(nullptr), get_partition_data(nullptr), get_bind_info(nullptr), type_pushdown(nullptr),
       get_multi_file_reader(nullptr), supports_pushdown_type(nullptr), supports_pushdown_extract(nullptr),
       get_partition_info(nullptr), get_partition_stats(nullptr), get_virtual_columns(nullptr),
-      get_row_id_columns(nullptr), set_scan_order(nullptr), serialize(nullptr), deserialize(nullptr),
-      projection_pushdown(false), filter_pushdown(false), filter_prune(false), sampling_pushdown(false),
-      late_materialization(false) {
+      get_row_id_columns(nullptr), set_scan_order(nullptr), add_row_group_scan_adapter(nullptr), serialize(nullptr),
+      deserialize(nullptr), projection_pushdown(false), filter_pushdown(false), filter_prune(false),
+      sampling_pushdown(false), late_materialization(false) {
 }
 
 TableFunction::TableFunction(const vector<LogicalType> &arguments, table_function_t function_,
