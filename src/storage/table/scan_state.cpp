@@ -254,11 +254,13 @@ bool CollectionScanState::Scan(DataChunk &result, TableScanType type, optional_p
 		if (result.size() > 0) {
 			return true;
 		}
-		// move to the next row group
+		// this variant is used by create-index and checkpoint scans, which must see every row group in storage order
+		// and are not bounded by max_row. Walk the segment tree directly rather than pulling from the row group source
+		// (the source is driven per-row-group by NextParallelScan, and its cursor/max_row would not line up here)
 		if (l) {
 			row_group = GetNextRowGroup(*l, *row_group).get();
 		} else {
-			row_group = GetNextRowGroup().get();
+			row_group = row_groups->GetNextSegment(*row_group).get();
 		}
 		if (row_group) {
 			row_group->GetNode().InitializeScan(*this, *row_group);
