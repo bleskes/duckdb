@@ -306,6 +306,12 @@ void RowGroupCollection::InitializeParallelScan(ClientContext &context, Parallel
 RowGroupScanAssignment RowGroupCollection::NextParallelScan(ClientContext &context, ParallelCollectionScanState &state,
                                                             CollectionScanState &scan_state,
                                                             optional_ptr<const InterruptState> interrupt_state) {
+	if (!state.row_group_source) {
+		// the parallel state was never initialized for this collection - e.g. transaction-local storage that did not
+		// exist when the scan was set up (InitializeParallelScan reset the source). Nothing to hand out
+		scan_state.batch_index = state.batch_index;
+		return RowGroupScanAssignment::Finished();
+	}
 	AssignSharedPointer(scan_state.row_groups, state.row_groups);
 	const auto verify_parallelism = ClientConfig::GetConfig(context).verify_parallelism;
 	while (true) {
