@@ -382,8 +382,8 @@ void LocalStorage::InitializeParallelScan(ClientContext &context, DataTable &tab
 	auto storage = table_manager.GetStorage(table);
 	if (!storage) {
 		state.max_row = 0;
-		state.verify_row_group = nullptr;
-		state.verify_vector_index = 0;
+		state.current_row_group = nullptr;
+		state.vector_index = 0;
 		// there is no transaction-local storage to scan - drop the source, if any, so that we never pull from it
 		state.row_group_source.reset();
 	} else {
