@@ -98,9 +98,10 @@ struct RowGroupScanSourceInput {
 	//! The context of the query that is scanning (not set for scans that run outside of a query)
 	optional_ptr<ClientContext> context;
 	//! The interrupt state of the scanning task, if the scan can be suspended. A source may only return BLOCKED when
-	//! this is set: it copies the InterruptState, returns BLOCKED, and later resumes the task via
-	//! InterruptState::Callback (from any thread). When not set, the source must not block - it either hands out a row
-	//! group, finishes, or waits inline
+	//! this is set. To avoid lost wakeups, register it with a StateWithBlockableTasks: under the state's lock, check
+	//! whether the source is ready and, if not, call BlockTask(guard, *interrupt_state) and return BLOCKED; when the
+	//! source becomes ready, call UnblockTasks(guard) under the same lock. When not set, the source must not block -
+	//! it either hands out a row group, finishes, or waits inline
 	optional_ptr<const InterruptState> interrupt_state;
 };
 
