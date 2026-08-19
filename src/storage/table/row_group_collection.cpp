@@ -236,11 +236,11 @@ namespace {
 //! source; scan states that inherit a source from the parallel scan state assigning their row groups receive a source
 //! that has already been initialized
 void InitializeRowGroupScanSource(RowGroupCollection &collection, shared_ptr<RowGroupScanSource> &source,
-                                  shared_ptr<RowGroupSegmentTree> row_groups, optional_ptr<ClientContext> context) {
+                                  shared_ptr<RowGroupSegmentTree> row_groups) {
 	if (!source) {
 		source = RowGroupScanSources::Storage();
 	}
-	RowGroupScanSourceInitInput input(collection, std::move(row_groups), context);
+	RowGroupScanSourceInitInput input(collection, std::move(row_groups));
 	source->Initialize(input);
 }
 
@@ -252,7 +252,7 @@ void RowGroupCollection::InitializeScan(const QueryContext &context, CollectionS
 	state.row_groups = GetRowGroups();
 	state.max_row = state.row_groups->GetBaseRowId() + total_rows;
 	state.Initialize(context, GetTypes());
-	InitializeRowGroupScanSource(*this, state.row_group_source, state.row_groups, context.GetClientContext());
+	InitializeRowGroupScanSource(*this, state.row_group_source, state.row_groups);
 	auto row_group = state.GetNextRowGroup();
 	while (row_group && !row_group->GetNode().InitializeScan(state, *row_group)) {
 		row_group = state.GetNextRowGroup();
@@ -290,12 +290,12 @@ bool RowGroupCollection::InitializeScanInRowGroup(ClientContext &context, Collec
 	return row_group.GetNode().InitializeScanWithOffset(state, row_group, vector_index);
 }
 
-void RowGroupCollection::InitializeParallelScan(ClientContext &context, ParallelCollectionScanState &state) {
+void RowGroupCollection::InitializeParallelScan(ParallelCollectionScanState &state) {
 	state.collection = this;
 	state.row_groups = GetRowGroups();
 	// install the source that hands out the row groups (defaults to storage order, replaces the reorderer). We do not
 	// pull the first row group here: the source might block, and we cannot suspend during init - NextParallelScan pulls
-	InitializeRowGroupScanSource(*this, state.row_group_source, state.row_groups, context);
+	InitializeRowGroupScanSource(*this, state.row_group_source, state.row_groups);
 	state.current_row_group = nullptr;
 	state.vector_index = 0;
 	state.max_row = state.row_groups->GetBaseRowId() + total_rows;

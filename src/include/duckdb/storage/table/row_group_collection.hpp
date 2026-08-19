@@ -79,7 +79,7 @@ public:
 	static bool InitializeScanInRowGroup(ClientContext &context, CollectionScanState &state,
 	                                     RowGroupCollection &collection, SegmentNode<RowGroup> &row_group,
 	                                     idx_t vector_index, idx_t max_row);
-	void InitializeParallelScan(ClientContext &context, ParallelCollectionScanState &state);
+	void InitializeParallelScan(ParallelCollectionScanState &state);
 	//! Assign the next row group to the given scan state. Returns BLOCKED if the row group source parked the scan - in
 	//! that case the caller must suspend the scan (the source resumes it via the interrupt_state it was handed)
 	RowGroupScanAssignment NextParallelScan(ClientContext &context, ParallelCollectionScanState &state,

@@ -76,9 +76,8 @@ struct RowGroupScanAssignment {
 // Row group scan source
 //===--------------------------------------------------------------------===//
 struct RowGroupScanSourceInitInput {
-	RowGroupScanSourceInitInput(RowGroupCollection &collection, shared_ptr<RowGroupSegmentTree> row_groups,
-	                            optional_ptr<ClientContext> context)
-	    : collection(collection), row_groups(std::move(row_groups)), context(context) {
+	RowGroupScanSourceInitInput(RowGroupCollection &collection, shared_ptr<RowGroupSegmentTree> row_groups)
+	    : collection(collection), row_groups(std::move(row_groups)) {
 	}
 
 	//! The collection that is being scanned - the persistent storage of the table, or its transaction-local storage
@@ -86,8 +85,6 @@ struct RowGroupScanSourceInitInput {
 	//! The segment tree holding the row groups of the collection. Sources that hand out row groups of the collection
 	//! must keep this alive for as long as they hand out row groups
 	shared_ptr<RowGroupSegmentTree> row_groups;
-	//! The context of the query that is scanning (not set for scans that run outside of a query)
-	optional_ptr<ClientContext> context;
 };
 
 struct RowGroupScanSourceInput {

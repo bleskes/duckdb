@@ -280,9 +280,9 @@ idx_t DataTable::MaxThreads(ClientContext &context) const {
 void DataTable::InitializeParallelScan(ClientContext &context, ParallelTableScanState &state,
                                        const vector<ColumnIndex> &column_indexes) {
 	auto &local_storage = LocalStorage::Get(context, db);
-	row_groups->InitializeParallelScan(context, state.scan_state);
+	row_groups->InitializeParallelScan(state.scan_state);
 
-	local_storage.InitializeParallelScan(context, *this, state.local_state);
+	local_storage.InitializeParallelScan(*this, state.local_state);
 }
 
 RowGroupScanAssignment DataTable::NextParallelScan(ClientContext &context, ParallelTableScanState &state,

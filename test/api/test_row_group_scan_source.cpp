@@ -40,8 +40,8 @@ public:
 	void Initialize(RowGroupScanSourceInitInput &input) override {
 		child->Initialize(input);
 		// drain the child - this is what a source that sorts or filters row groups does. The built-in child sources
-		// never block, so we pull them out directly with no interrupt state
-		RowGroupScanSourceInput next_input(input.context, nullptr);
+		// never block, so we pull them out directly with no context and no interrupt state
+		RowGroupScanSourceInput next_input(nullptr, nullptr);
 		while (true) {
 			auto result = child->Next(next_input);
 			if (result.type != AsyncResultType::HAVE_MORE_OUTPUT) {
