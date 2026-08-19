@@ -174,7 +174,7 @@ TableScanOptions &CollectionScanState::GetOptions() {
 }
 
 ParallelCollectionScanState::ParallelCollectionScanState()
-    : collection(nullptr), max_row(0), batch_index(0), processed_rows(0), verify_row_group(nullptr),
+    : collection(nullptr), max_row(0), processed_rows(0), batch_index(0), verify_row_group(nullptr),
       verify_vector_index(0) {
 }
 
