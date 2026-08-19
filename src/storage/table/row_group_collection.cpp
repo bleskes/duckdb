@@ -318,55 +318,57 @@ RowGroupScanAssignment RowGroupCollection::NextParallelScan(ClientContext &conte
 		idx_t vector_index = 0;
 		idx_t max_row;
 		optional_ptr<SegmentNode<RowGroup>> row_group;
-		if (verify_parallelism) {
-			// hand out a single vector at a time, so we need to keep the current row group around
-			lock_guard<mutex> l(state.verify_lock);
-			if (!state.verify_row_group) {
+		{
+			// pull the next row group and allocate its batch index atomically, so the batch index reflects the order
+			// in which row groups are handed out (the source may synchronize itself, but the pull and the ordinal must
+			// be assigned together)
+			lock_guard<mutex> l(state.lock);
+			if (verify_parallelism) {
+				// hand out a single vector at a time, so we need to keep the current row group around
+				if (!state.verify_row_group) {
+					auto result = state.NextRowGroup(context, interrupt_state);
+					if (result.type == AsyncResultType::BLOCKED) {
+						return RowGroupScanAssignment::Blocked();
+					}
+					if (result.type == AsyncResultType::FINISHED || result.row_group->GetCount() == 0) {
+						break;
+					}
+					state.verify_row_group = result.row_group;
+					state.verify_vector_index = 0;
+				}
+				row_group = state.verify_row_group;
+				const auto row_group_count = row_group->GetCount();
+				vector_index = state.verify_vector_index;
+				D_ASSERT(vector_index * STANDARD_VECTOR_SIZE < row_group_count);
+				max_row = row_group->GetRowStart() +
+				          MinValue<idx_t>(row_group_count, STANDARD_VECTOR_SIZE * (vector_index + 1));
+				state.verify_vector_index++;
+				if (state.verify_vector_index * STANDARD_VECTOR_SIZE >= row_group_count) {
+					state.verify_row_group = nullptr;
+					state.verify_vector_index = 0;
+				}
+			} else {
 				auto result = state.NextRowGroup(context, interrupt_state);
 				if (result.type == AsyncResultType::BLOCKED) {
+					// the source parked the scan - the caller must suspend it (the source resumes it later)
 					return RowGroupScanAssignment::Blocked();
 				}
 				if (result.type == AsyncResultType::FINISHED || result.row_group->GetCount() == 0) {
+					// no more data left to scan
 					break;
 				}
-				state.verify_row_group = result.row_group;
-				state.verify_vector_index = 0;
+				row_group = result.row_group;
+				state.processed_rows += row_group->GetCount();
+				max_row = row_group->GetRowEnd();
 			}
-			row_group = state.verify_row_group;
-			const auto row_group_count = row_group->GetCount();
-			vector_index = state.verify_vector_index;
-			D_ASSERT(vector_index * STANDARD_VECTOR_SIZE < row_group_count);
-			max_row =
-			    row_group->GetRowStart() + MinValue<idx_t>(row_group_count, STANDARD_VECTOR_SIZE * (vector_index + 1));
-			state.verify_vector_index++;
-			if (state.verify_vector_index * STANDARD_VECTOR_SIZE >= row_group_count) {
-				state.verify_row_group = nullptr;
-				state.verify_vector_index = 0;
-			}
-		} else {
-			// pull the next row group out of the row group source - the source synchronizes itself, so we can pull
-			// without holding a lock
-			auto result = state.NextRowGroup(context, interrupt_state);
-			if (result.type == AsyncResultType::BLOCKED) {
-				// the source parked the scan - the caller must suspend it (the source resumes it later)
-				return RowGroupScanAssignment::Blocked();
-			}
-			if (result.type == AsyncResultType::FINISHED || result.row_group->GetCount() == 0) {
-				// no more data left to scan
-				break;
-			}
-			row_group = result.row_group;
-			state.processed_rows += row_group->GetCount();
-			max_row = row_group->GetRowEnd();
+			max_row = MinValue<idx_t>(max_row, state.max_row);
+			scan_state.batch_index = ++state.batch_index;
 		}
-		max_row = MinValue<idx_t>(max_row, state.max_row);
-		// the batch index is assigned in the order in which the row groups are handed out
-		scan_state.batch_index = ++state.batch_index;
 
 		D_ASSERT(state.collection);
 		D_ASSERT(row_group);
 
-		// initialize the scan for this row group
+		// initialize the scan for this row group (outside the lock)
 		bool need_to_scan =
 		    InitializeScanInRowGroup(context, scan_state, *state.collection, *row_group, vector_index, max_row);
 		if (!need_to_scan) {
@@ -375,6 +377,7 @@ RowGroupScanAssignment RowGroupCollection::NextParallelScan(ClientContext &conte
 		}
 		return RowGroupScanAssignment::RowGroupAssigned(row_group->GetCount());
 	}
+	lock_guard<mutex> l(state.lock);
 	scan_state.batch_index = state.batch_index;
 	return RowGroupScanAssignment::Finished();
 }

@@ -232,3 +232,24 @@ TEST_CASE("Test row group scan source - blocking and resuming the scan", "[api]"
 	REQUIRE_NO_FAIL(*result);
 	REQUIRE(result->GetValue(0, 0) == Value::BIGINT(NumericCast<int64_t>(row_count)));
 }
+
+TEST_CASE("Test row group scan source - index scan does not bypass the adapter", "[api]") {
+	TestSourceStats stats;
+	idx_t row_count;
+	auto db = MakeDatabase(TestSourceMode::FIRST_ONLY, stats, row_count);
+	Connection conn(*db);
+	// an index over i would let a point predicate use an index scan, which fetches rows by row id
+	REQUIRE_NO_FAIL(conn.Query("CREATE INDEX idx ON integers(i)"));
+
+	// this value lives in the last row group, which the FIRST_ONLY adapter drops. An index scan would bypass the
+	// adapter and find the row; falling back to a full table scan keeps the adapter in effect, so it is not visible
+	auto needle = to_string(row_count - 1);
+	auto result = conn.Query("SELECT count(*) FROM integers WHERE i = " + needle);
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(result->GetValue(0, 0) == Value::BIGINT(0));
+
+	// a value in the first row group is still found - the adapter hands that row group out
+	result = conn.Query("SELECT count(*) FROM integers WHERE i = 0");
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(result->GetValue(0, 0) == Value::BIGINT(1));
+}

@@ -342,15 +342,17 @@ struct ParallelCollectionScanState {
 	RowGroupCollection *collection;
 	shared_ptr<RowGroupSegmentTree> row_groups;
 	idx_t max_row;
-	atomic<idx_t> batch_index;
 	atomic<idx_t> processed_rows;
+	//! Serializes pulling the next row group from the source together with allocating its batch index, so that the
+	//! batch index reflects the order in which row groups are handed out
+	mutex lock;
+	idx_t batch_index;
 
 	//! The source that hands out the row groups to scan. Set before initializing the scan, defaults to handing out
 	//! all row groups in storage order. Shared with the scan states of all threads scanning this collection
 	shared_ptr<RowGroupScanSource> row_group_source;
 
 	//! State used to hand out a single vector at a time, only used when verify_parallelism is enabled
-	mutex verify_lock;
 	optional_ptr<SegmentNode<RowGroup>> verify_row_group;
 	idx_t verify_vector_index;
 };

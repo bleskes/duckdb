@@ -730,6 +730,12 @@ unique_ptr<GlobalTableFunctionState> TableScanInitGlobal(ClientContext &context,
 	auto &duck_table = bind_data.table.Cast<DuckTableEntry>();
 	auto &storage = duck_table.GetStorage();
 
+	// An index scan fetches rows by row id and bypasses the row group source, so it would skip any attached adapters.
+	// Fall back to a full table scan (which goes through the source) when adapters are attached.
+	if (!bind_data.row_group_scan_adapters.empty()) {
+		return DuckTableScanInitGlobal(context, input, storage, bind_data);
+	}
+
 	// Can't index scan without filters.
 	if (!input.filters) {
 		return DuckTableScanInitGlobal(context, input, storage, bind_data);

@@ -62,6 +62,9 @@ public:
 	optional_idx ordinality_idx;
 	//! Row group order options (if set)
 	unique_ptr<RowGroupOrderOptions> row_group_order_options;
+	//! Whether an extension attached a row group scan adapter to this scan. Adapters cannot be serialized, so a get
+	//! that has one is excluded from serialization verification (they are re-attached by the optimizer extension)
+	bool has_row_group_scan_adapter = false;
 
 	string GetName() const override;
 	InsertionOrderPreservingMap<string> ParamsToString() const override;
@@ -91,7 +94,7 @@ public:
 	vector<idx_t> GetTableIndex() const override;
 	//! Skips the serialization check in VerifyPlan
 	bool SupportSerialization() const override {
-		return function.verify_serialization;
+		return function.verify_serialization && !has_row_group_scan_adapter;
 	}
 
 	void Serialize(Serializer &serializer) const override;

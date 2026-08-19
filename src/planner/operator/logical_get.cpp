@@ -245,6 +245,7 @@ void LogicalGet::AddRowGroupScanAdapter(shared_ptr<RowGroupScanAdapter> adapter)
 		    function.name);
 	}
 	function.add_row_group_scan_adapter(std::move(adapter), bind_data.get());
+	has_row_group_scan_adapter = true;
 }
 
 void LogicalGet::Serialize(Serializer &serializer) const {
