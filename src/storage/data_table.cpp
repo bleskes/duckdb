@@ -297,6 +297,11 @@ RowGroupScanAssignment DataTable::NextParallelScan(ClientContext &context, Paral
 	return local_storage.NextParallelScan(context, *this, state.local_state, scan_state.local_state, interrupt_state);
 }
 
+idx_t DataTable::NextParallelScan(ClientContext &context, ParallelTableScanState &state, TableScanState &scan_state) {
+	auto assignment = NextParallelScan(context, state, scan_state, nullptr);
+	return assignment.HasRowGroup() ? assignment.rows : 0;
+}
+
 void DataTable::Scan(DuckTransaction &transaction, DataChunk &result, TableScanState &state) {
 	// scan the persistent segments
 	if (state.table_state.Scan(transaction, result)) {
