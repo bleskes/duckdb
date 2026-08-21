@@ -48,7 +48,9 @@ concurrency:
 
 env:
   GH_TOKEN: ${{ secrets.GH_TOKEN }}
-  BASE_BRANCH: ${{ github.base_ref || (endsWith(github.ref, '_feature') && 'feature' || 'main') }}
+  # base_ref is empty on push events; fall back to the release line this fork tracks (v1.5-variegata) instead of main,
+  # so regression baselines are cloned from the matching branch rather than the diverged duckdb dev line
+  BASE_BRANCH: ${{ github.base_ref || (endsWith(github.ref, '_feature') && 'feature' || 'v1.5-variegata') }}
   BASE_HASH: ${{ inputs.base_hash }}
 
 jobs:

@@ -158,4 +158,6 @@ jobs:
       - name: Tidy Check Diff
         shell: bash
         if: ${{ github.ref != 'refs/heads/main' && github.ref != 'refs/heads/feature' }}
-        run: DUCKDB_GIT_BASE_BRANCH=${{ github.base_ref }} make tidy-check-diff
+        # base_ref is empty on push events; fall back to the release line this fork tracks so the tidy diff is
+        # computed against v1.5-variegata rather than origin/main (this fork's main tracks the diverged duckdb dev line)
+        run: DUCKDB_GIT_BASE_BRANCH=${{ github.base_ref || 'v1.5-variegata' }} make tidy-check-diff
