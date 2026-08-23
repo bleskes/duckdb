@@ -233,9 +233,10 @@ void RowGroupCollection::Verify() {
 //===--------------------------------------------------------------------===//
 namespace {
 
-//! Set up the source that hands out the row groups of this scan. This is called by the scan state that creates the
-//! source; scan states that inherit a source from the parallel scan state assigning their row groups receive a source
-//! that has already been initialized
+//! Set up the source that hands out the row groups of this scan. source is null unless the caller already installed one
+//! - the table scan installs a storage/reordered/adapter-wrapped source before initializing (see table_scan.cpp), and
+//! offset scans install a storage-order source seeded at their start. It is null for the plain sequential scan paths,
+//! which default to handing out all row groups in storage order
 void InitializeRowGroupScanSource(RowGroupCollection &collection, shared_ptr<RowGroupScanSource> &source,
                                   shared_ptr<RowGroupSegmentTree> row_groups) {
 	if (!source) {
