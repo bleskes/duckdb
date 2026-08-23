@@ -1,6 +1,5 @@
 #include "duckdb/storage/table/row_group_scan_source.hpp"
 
-#include "duckdb/common/mutex.hpp"
 #include "duckdb/storage/table/row_group_reorderer.hpp"
 #include "duckdb/storage/table/row_group_segment_tree.hpp"
 
@@ -25,25 +24,6 @@ RowGroupScanResult RowGroupScanResult::Blocked() {
 	return result;
 }
 
-RowGroupScanAssignment RowGroupScanAssignment::RowGroupAssigned(idx_t rows) {
-	RowGroupScanAssignment result;
-	result.type = AsyncResultType::HAVE_MORE_OUTPUT;
-	result.rows = rows;
-	return result;
-}
-
-RowGroupScanAssignment RowGroupScanAssignment::Finished() {
-	RowGroupScanAssignment result;
-	result.type = AsyncResultType::FINISHED;
-	return result;
-}
-
-RowGroupScanAssignment RowGroupScanAssignment::Blocked() {
-	RowGroupScanAssignment result;
-	result.type = AsyncResultType::BLOCKED;
-	return result;
-}
-
 RowGroupScanSource::~RowGroupScanSource() {
 }
 
@@ -61,8 +41,7 @@ public:
 
 	RowGroupScanResult Next(RowGroupScanSourceInput &input) override {
 		D_ASSERT(row_groups);
-		// walking the segment tree is inherently sequential - serialize the cursor
-		lock_guard<mutex> guard(cursor_lock);
+		// Next() is called serialized by the scan, so the cursor needs no synchronization
 		if (finished) {
 			return RowGroupScanResult::Finished();
 		}
@@ -76,7 +55,6 @@ public:
 
 private:
 	shared_ptr<RowGroupSegmentTree> row_groups;
-	mutex cursor_lock;
 	//! The row group that was handed out last
 	optional_ptr<SegmentNode<RowGroup>> cursor;
 	//! Whether or not the last row group has been handed out

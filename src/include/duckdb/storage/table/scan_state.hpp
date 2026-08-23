@@ -330,9 +330,9 @@ private:
 
 struct ParallelCollectionScanState {
 	ParallelCollectionScanState();
-	//! Pull the next row group out of the row group source. Can be called concurrently: the source synchronizes
-	//! itself. interrupt_state is the scanning task's interrupt state, so the source can park the scan (only set when
-	//! the scan can be suspended)
+	//! Pull the next row group out of the row group source. Called under the state lock, so the source is not pulled
+	//! concurrently. interrupt_state is the scanning task's interrupt state, so the source can park the scan (only set
+	//! when the scan can be suspended)
 	RowGroupScanResult NextRowGroup(optional_ptr<ClientContext> context,
 	                                optional_ptr<const InterruptState> interrupt_state) const;
 

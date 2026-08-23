@@ -13,7 +13,6 @@
 #include "duckdb/storage/table/row_group_scan_source.hpp"
 #include "duckdb/storage/table/row_group_segment_tree.hpp"
 #include "duckdb/storage/table/segment_tree.hpp"
-#include "duckdb/common/atomic.hpp"
 #include "duckdb/common/enums/order_type.hpp"
 
 namespace duckdb {
@@ -78,8 +77,8 @@ private:
 	shared_ptr<RowGroupSegmentTree> row_groups;
 	//! The row groups in the order in which they are handed out - immutable after Initialize
 	vector<reference<SegmentNode<RowGroup>>> ordered_row_groups;
-	//! The index of the next row group to hand out
-	atomic<idx_t> next_index;
+	//! The index of the next row group to hand out (Next is called serialized, so this needs no synchronization)
+	idx_t next_index;
 };
 
 } // namespace duckdb
