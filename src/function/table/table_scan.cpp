@@ -64,7 +64,6 @@ struct TableScanLocalState : public LocalTableFunctionState {
 	//! This includes filter columns, which are immediately removed.
 	DataChunk all_columns;
 
-	idx_t rows_in_current_row_group = 0;
 	idx_t row_groups_scanned = 0;
 };
 
@@ -357,28 +356,24 @@ public:
 			    data_p.interrupt_state->CanCallback()) {
 				interrupt_state = data_p.interrupt_state;
 			}
-			auto assignment = storage.NextParallelScan(context, state, l_state.scan_state, interrupt_state);
-			if (assignment.IsBlocked()) {
+			auto scan_result = storage.NextParallelScan(context, state, l_state.scan_state, interrupt_state);
+			if (scan_result == AsyncResultType::BLOCKED) {
 				// the source parked the scan (it copied our interrupt state and will call Callback later). Return a
 				// taskless BLOCKED result so the pipeline task is suspended until then
 				data_p.async_result = AsyncResultType::BLOCKED;
 				return;
 			}
-			l_state.rows_in_current_row_group = assignment.rows;
-			if (l_state.rows_in_current_row_group > 0) {
+			bool have_row_group = scan_result == AsyncResultType::HAVE_MORE_OUTPUT;
+			if (have_row_group) {
 				l_state.row_groups_scanned++;
 			}
 
 			if (data_p.results_execution_mode == AsyncResultsExecutionMode::TASK_EXECUTOR) {
 				// We can avoid looping, and just return as appropriate
-				if (l_state.rows_in_current_row_group == 0) {
-					data_p.async_result = AsyncResultType::FINISHED;
-				} else {
-					data_p.async_result = AsyncResultType::HAVE_MORE_OUTPUT;
-				}
+				data_p.async_result = have_row_group ? AsyncResultType::HAVE_MORE_OUTPUT : AsyncResultType::FINISHED;
 				return;
 			}
-			if (l_state.rows_in_current_row_group == 0) {
+			if (!have_row_group) {
 				return;
 			}
 

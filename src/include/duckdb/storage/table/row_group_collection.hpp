@@ -80,10 +80,11 @@ public:
 	                                     RowGroupCollection &collection, SegmentNode<RowGroup> &row_group,
 	                                     idx_t vector_index, idx_t max_row);
 	void InitializeParallelScan(ParallelCollectionScanState &state);
-	//! Assign the next row group to the given scan state. Returns BLOCKED if the row group source parked the scan
-	RowGroupScanAssignment NextParallelScan(ClientContext &context, ParallelCollectionScanState &state,
-	                                        CollectionScanState &scan_state,
-	                                        optional_ptr<const InterruptState> interrupt_state);
+	//! Assign the next row group to the given scan state. On HAVE_MORE_OUTPUT the assigned row group is set on the scan
+	//! state; returns BLOCKED if the row group source parked the scan, FINISHED when there is nothing left to scan
+	AsyncResultType NextParallelScan(ClientContext &context, ParallelCollectionScanState &state,
+	                                 CollectionScanState &scan_state,
+	                                 optional_ptr<const InterruptState> interrupt_state);
 
 	RowGroupIterationHelper Chunks(DuckTransaction &transaction);
 	RowGroupIterationHelper Chunks(DuckTransaction &transaction, const vector<StorageIndex> &column_ids);

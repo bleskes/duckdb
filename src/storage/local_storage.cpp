@@ -398,13 +398,12 @@ OptimisticWriteCollection &LocalTableStorage::GetPrimaryCollection() {
 	return *row_groups;
 }
 
-RowGroupScanAssignment LocalStorage::NextParallelScan(ClientContext &context, DataTable &table,
-                                                      ParallelCollectionScanState &state,
-                                                      CollectionScanState &scan_state,
-                                                      optional_ptr<const InterruptState> interrupt_state) {
+AsyncResultType LocalStorage::NextParallelScan(ClientContext &context, DataTable &table,
+                                               ParallelCollectionScanState &state, CollectionScanState &scan_state,
+                                               optional_ptr<const InterruptState> interrupt_state) {
 	auto storage = table_manager.GetStorage(table);
 	if (!storage) {
-		return RowGroupScanAssignment::Finished();
+		return AsyncResultType::FINISHED;
 	}
 	return storage->GetCollection().NextParallelScan(context, state, scan_state, interrupt_state);
 }

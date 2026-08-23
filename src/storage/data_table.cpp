@@ -285,12 +285,13 @@ void DataTable::InitializeParallelScan(ClientContext &context, ParallelTableScan
 	local_storage.InitializeParallelScan(*this, state.local_state);
 }
 
-RowGroupScanAssignment DataTable::NextParallelScan(ClientContext &context, ParallelTableScanState &state,
-                                                   TableScanState &scan_state,
-                                                   optional_ptr<const InterruptState> interrupt_state) {
-	auto assignment = row_groups->NextParallelScan(context, state.scan_state, scan_state.table_state, interrupt_state);
-	if (assignment.HasRowGroup() || assignment.IsBlocked()) {
-		return assignment;
+AsyncResultType DataTable::NextParallelScan(ClientContext &context, ParallelTableScanState &state,
+                                            TableScanState &scan_state,
+                                            optional_ptr<const InterruptState> interrupt_state) {
+	auto result = row_groups->NextParallelScan(context, state.scan_state, scan_state.table_state, interrupt_state);
+	if (result != AsyncResultType::FINISHED) {
+		// a row group was assigned, or the scan was parked
+		return result;
 	}
 	// finished scanning the persistent storage - move on to the transaction-local storage
 	auto &local_storage = LocalStorage::Get(context, db);
@@ -298,8 +299,18 @@ RowGroupScanAssignment DataTable::NextParallelScan(ClientContext &context, Paral
 }
 
 idx_t DataTable::NextParallelScan(ClientContext &context, ParallelTableScanState &state, TableScanState &scan_state) {
-	auto assignment = NextParallelScan(context, state, scan_state, nullptr);
-	return assignment.HasRowGroup() ? assignment.rows : 0;
+	// backwards-compatible overload: return the number of rows in the assigned row group (0 when finished). The count
+	// comes from whichever collection handed out the row group, like the pre-existing implementation
+	if (row_groups->NextParallelScan(context, state.scan_state, scan_state.table_state, nullptr) ==
+	    AsyncResultType::HAVE_MORE_OUTPUT) {
+		return scan_state.table_state.row_group->GetCount();
+	}
+	auto &local_storage = LocalStorage::Get(context, db);
+	if (local_storage.NextParallelScan(context, *this, state.local_state, scan_state.local_state, nullptr) ==
+	    AsyncResultType::HAVE_MORE_OUTPUT) {
+		return scan_state.local_state.row_group->GetCount();
+	}
+	return 0;
 }
 
 void DataTable::Scan(DuckTransaction &transaction, DataChunk &result, TableScanState &state) {

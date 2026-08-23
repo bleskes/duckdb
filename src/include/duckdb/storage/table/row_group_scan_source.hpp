@@ -48,24 +48,6 @@ struct RowGroupScanResult {
 	}
 };
 
-//! The result of assigning the next row group to a scan thread
-struct RowGroupScanAssignment {
-	AsyncResultType type = AsyncResultType::FINISHED;
-	//! The number of rows in the assigned row group - only set for HAVE_MORE_OUTPUT
-	idx_t rows = 0;
-
-	bool HasRowGroup() const {
-		return type == AsyncResultType::HAVE_MORE_OUTPUT;
-	}
-	bool IsBlocked() const {
-		return type == AsyncResultType::BLOCKED;
-	}
-
-	DUCKDB_API static RowGroupScanAssignment RowGroupAssigned(idx_t rows);
-	DUCKDB_API static RowGroupScanAssignment Finished();
-	DUCKDB_API static RowGroupScanAssignment Blocked();
-};
-
 //===--------------------------------------------------------------------===//
 // Row group scan source
 //===--------------------------------------------------------------------===//
@@ -116,9 +98,9 @@ public:
 	//! initialization. Work that has to wait on something belongs in Next, which can return BLOCKED
 	virtual void Initialize(RowGroupScanSourceInitInput &input) = 0;
 
-	//! Hand out the next row group to scan. This is called concurrently by all threads of the scan, so
-	//! implementations must synchronize themselves. Do not perform long-running work here - return BLOCKED instead,
-	//! and hand out row groups once the work has completed
+	//! Hand out the next row group to scan. The scan serializes calls to Next (it holds a lock while pulling), so
+	//! implementations do not need to synchronize themselves. Do not perform long-running work here - return BLOCKED
+	//! instead, and hand out row groups once the work has completed
 	virtual RowGroupScanResult Next(RowGroupScanSourceInput &input) = 0;
 
 	template <class TARGET>

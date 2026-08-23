@@ -309,31 +309,31 @@ void RowGroupCollection::InitializeParallelScan(ParallelCollectionScanState &sta
 	state.processed_rows = 0;
 }
 
-RowGroupScanAssignment RowGroupCollection::NextParallelScan(ClientContext &context, ParallelCollectionScanState &state,
-                                                            CollectionScanState &scan_state,
-                                                            optional_ptr<const InterruptState> interrupt_state) {
+AsyncResultType RowGroupCollection::NextParallelScan(ClientContext &context, ParallelCollectionScanState &state,
+                                                     CollectionScanState &scan_state,
+                                                     optional_ptr<const InterruptState> interrupt_state) {
 	if (!state.row_group_source) {
 		// the parallel state was never initialized for this collection - e.g. transaction-local storage that did not
 		// exist when the scan was set up (InitializeParallelScan reset the source). Nothing to hand out
 		scan_state.batch_index = state.batch_index;
-		return RowGroupScanAssignment::Finished();
+		return AsyncResultType::FINISHED;
 	}
 	AssignSharedPointer(scan_state.row_groups, state.row_groups);
 	while (true) {
 		idx_t vector_index;
 		idx_t max_row;
+		optional_ptr<RowGroupCollection> collection;
 		optional_ptr<SegmentNode<RowGroup>> row_group;
 		{
-			// pull the next row group and allocate its batch index atomically, so the batch index reflects the order in
-			// which row groups are handed out (the source synchronizes itself, but the pull and the ordinal go
-			// together)
+			// select the next row group to scan from the parallel state. The source is pulled under the state lock, so
+			// it is never pulled concurrently, and the pull and the batch index allocation stay together
 			lock_guard<mutex> l(state.lock);
 			if (!state.current_row_group) {
-				// pull the next row group from the source (replaces the reorderer / segment tree walk)
+				// pull the next row group from the source (replaces walking the row groups directly)
 				auto result = state.NextRowGroup(context, interrupt_state);
 				if (result.type == AsyncResultType::BLOCKED) {
 					// the source parked the scan - the caller must suspend it (the source resumes it later)
-					return RowGroupScanAssignment::Blocked();
+					return AsyncResultType::BLOCKED;
 				}
 				if (result.type == AsyncResultType::FINISHED) {
 					break;
@@ -346,9 +346,9 @@ RowGroupScanAssignment RowGroupCollection::NextParallelScan(ClientContext &conte
 				break;
 			}
 			auto row_start = state.current_row_group->GetRowStart();
+			collection = state.collection;
 			row_group = state.current_row_group;
 			if (ClientConfig::GetConfig(context).verify_parallelism) {
-				// hand out a single vector at a time, keeping the current row group around across calls
 				vector_index = state.vector_index;
 				max_row = row_start + MinValue<idx_t>(current_row_group.count,
 				                                      STANDARD_VECTOR_SIZE * state.vector_index + STANDARD_VECTOR_SIZE);
@@ -362,26 +362,27 @@ RowGroupScanAssignment RowGroupCollection::NextParallelScan(ClientContext &conte
 				state.processed_rows += current_row_group.count;
 				vector_index = 0;
 				max_row = row_start + current_row_group.count;
-				// consumed - the next call pulls a fresh row group from the source
 				state.current_row_group = nullptr;
 			}
 			max_row = MinValue<idx_t>(max_row, state.max_row);
 			scan_state.batch_index = ++state.batch_index;
 		}
 
-		D_ASSERT(state.collection);
+		D_ASSERT(collection);
 		D_ASSERT(row_group);
 
-		// initialize the scan for this row group (outside the lock)
-		if (!InitializeScanInRowGroup(context, scan_state, *state.collection, *row_group, vector_index, max_row)) {
+		// initialize the scan for this row group
+		bool need_to_scan =
+		    InitializeScanInRowGroup(context, scan_state, *collection, *row_group, vector_index, max_row);
+		if (!need_to_scan) {
 			// skip this row group
 			continue;
 		}
-		return RowGroupScanAssignment::RowGroupAssigned(row_group->GetCount());
+		return AsyncResultType::HAVE_MORE_OUTPUT;
 	}
 	lock_guard<mutex> l(state.lock);
 	scan_state.batch_index = state.batch_index;
-	return RowGroupScanAssignment::Finished();
+	return AsyncResultType::FINISHED;
 }
 
 //===--------------------------------------------------------------------===//
