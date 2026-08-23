@@ -32,17 +32,20 @@ struct TableScanBindData;
 //! The result of pulling a row group out of a RowGroupScanSource
 struct RowGroupScanResult {
 	AsyncResultType type = AsyncResultType::FINISHED;
-	//! The row group to scan - only set for HAVE_MORE_OUTPUT
+	//! The row group to scan. Set exactly for HAVE_MORE_OUTPUT; FINISHED and BLOCKED never carry a row group
 	optional_ptr<SegmentNode<RowGroup>> row_group;
 
-	//! Hand out a row group to scan
+	//! Hand out a row group to scan (HAVE_MORE_OUTPUT). The scan is not done - Next is called again for the next one
 	DUCKDB_API static RowGroupScanResult WithRowGroup(SegmentNode<RowGroup> &row_group);
+	//! No more row groups to hand out - the scan of this collection is done. Carries no row group
 	DUCKDB_API static RowGroupScanResult Finished();
 	//! Park the scan. The source must have stashed the input's InterruptState and must resume the scan by calling
 	//! InterruptState::Callback once it can hand out row groups again. Only allowed when the input carries an
-	//! InterruptState (i.e. the scan can be suspended)
+	//! InterruptState (i.e. the scan can be suspended). Carries no row group
 	DUCKDB_API static RowGroupScanResult Blocked();
 
+	//! Whether the result is internally consistent: a row group is present exactly for HAVE_MORE_OUTPUT, and neither
+	//! FINISHED nor BLOCKED carries one
 	bool Verify() const {
 		return (type == AsyncResultType::HAVE_MORE_OUTPUT) == static_cast<bool>(row_group);
 	}

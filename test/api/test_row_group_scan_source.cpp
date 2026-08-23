@@ -201,10 +201,12 @@ TEST_CASE("Test row group scan source - reordering", "[api]") {
 	// the last row group is scanned first
 	REQUIRE(result->GetValue(0, 0) == Value::BIGINT(NumericCast<int64_t>(2 * DEFAULT_ROW_GROUP_SIZE)));
 
-	// the source sees every row group of the scan exactly once, so the counts still add up
+	// the source sees every row group of the scan exactly once, so both the row count and the sum of all values add up
+	// (the sum would not match if any row were dropped, duplicated or altered by the reordering)
 	result = conn.Query("SELECT count(*), sum(i) FROM integers");
 	REQUIRE_NO_FAIL(*result);
 	REQUIRE(result->GetValue(0, 0) == Value::BIGINT(NumericCast<int64_t>(row_count)));
+	REQUIRE(result->GetValue(1, 0) == Value::BIGINT(NumericCast<int64_t>(row_count * (row_count - 1) / 2)));
 }
 
 TEST_CASE("Test row group scan source - filtering out row groups", "[api]") {
@@ -238,6 +240,8 @@ TEST_CASE("Test row group scan source - blocking and resuming the scan", "[api]"
 	auto result = conn.Query("SELECT count(*), sum(i) FROM integers");
 	REQUIRE_NO_FAIL(*result);
 	REQUIRE(result->GetValue(0, 0) == Value::BIGINT(NumericCast<int64_t>(row_count)));
+	// every row survives the block/resume exactly once - the value sum confirms none were dropped or duplicated
+	REQUIRE(result->GetValue(1, 0) == Value::BIGINT(NumericCast<int64_t>(row_count * (row_count - 1) / 2)));
 	REQUIRE(stats.blocks == 1);
 	REQUIRE(stats.row_groups_handed_out == 3);
 
