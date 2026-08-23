@@ -52,6 +52,9 @@ namespace {
 //! Hands out the row groups of the collection in storage order
 class StorageRowGroupScanSource : public RowGroupScanSource {
 public:
+	explicit StorageRowGroupScanSource(optional_ptr<SegmentNode<RowGroup>> resume_after) : cursor(resume_after) {
+	}
+
 	void Initialize(RowGroupScanSourceInitInput &input) override {
 		row_groups = input.row_groups;
 	}
@@ -82,8 +85,8 @@ private:
 
 } // namespace
 
-unique_ptr<RowGroupScanSource> RowGroupScanSources::Storage() {
-	auto result = make_uniq<StorageRowGroupScanSource>();
+unique_ptr<RowGroupScanSource> RowGroupScanSources::Storage(optional_ptr<SegmentNode<RowGroup>> resume_after) {
+	auto result = make_uniq<StorageRowGroupScanSource>(resume_after);
 	return std::move(result);
 }
 

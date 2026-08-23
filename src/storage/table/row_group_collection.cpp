@@ -273,6 +273,10 @@ void RowGroupCollection::InitializeScanWithOffset(const QueryContext &context, C
 	D_ASSERT(row_group);
 	state.max_row = end_row;
 	state.Initialize(context, GetTypes());
+	// install a storage-order source that resumes after this row group, so the scan advances through the same
+	// RowGroupScanSource as every other scan (GetNextRowGroup) rather than walking the segment tree directly
+	state.row_group_source = RowGroupScanSources::Storage(row_group);
+	InitializeRowGroupScanSource(*this, state.row_group_source, state.row_groups);
 	idx_t start_vector = (start_row - row_group->GetRowStart()) / STANDARD_VECTOR_SIZE;
 	if (!row_group->GetNode().InitializeScanWithOffset(state, *row_group, start_vector)) {
 		throw InternalException("Failed to initialize row group scan with offset");

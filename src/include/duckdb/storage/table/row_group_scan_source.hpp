@@ -135,8 +135,11 @@ public:
 
 //! The built-in row group scan sources
 struct RowGroupScanSources {
-	//! Hands out all row groups of the collection in storage (i.e. row id) order - the default source
-	DUCKDB_API static unique_ptr<RowGroupScanSource> Storage();
+	//! Hands out all row groups of the collection in storage (i.e. row id) order - the default source. resume_after,
+	//! if set, is the row group to resume after: the source hands out its successors, not the whole collection (used by
+	//! offset scans that are already positioned on a row group)
+	DUCKDB_API static unique_ptr<RowGroupScanSource>
+	Storage(optional_ptr<SegmentNode<RowGroup>> resume_after = nullptr);
 	//! Hands out row groups in the order dictated by the given order options, which are pushed into the scan by the
 	//! optimizer for queries that can be answered by scanning row groups in a specific order (e.g. ORDER BY + LIMIT)
 	DUCKDB_API static unique_ptr<RowGroupScanSource> Reordered(const RowGroupOrderOptions &options,

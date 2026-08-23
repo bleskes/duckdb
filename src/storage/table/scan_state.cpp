@@ -192,11 +192,7 @@ CollectionScanState::CollectionScanState(TableScanState &parent_p)
 }
 
 optional_ptr<SegmentNode<RowGroup>> CollectionScanState::GetNextRowGroup() {
-	if (!row_group_source) {
-		// no source installed - e.g. an offset scan (InitializeScanWithOffset) positioned directly on the segment
-		// tree. Walk the collection in storage order from the current row group
-		return row_group ? row_groups->GetNextSegment(*row_group) : nullptr;
-	}
+	D_ASSERT(row_group_source);
 	// the sequential scan path has no pipeline task to suspend, so it passes no InterruptState: a source may not block
 	// here. Only the built-in sources reach this path today, and they never block
 	RowGroupScanSourceInput input(context, nullptr);
