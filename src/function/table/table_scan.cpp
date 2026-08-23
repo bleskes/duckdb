@@ -357,27 +357,23 @@ public:
 				interrupt_state = data_p.interrupt_state;
 			}
 			auto scan_result = storage.NextParallelScan(context, state, l_state.scan_state, interrupt_state);
-			if (scan_result == AsyncResultType::BLOCKED) {
-				// the source parked the scan (it copied our interrupt state and will call Callback later). Return a
-				// taskless BLOCKED result so the pipeline task is suspended until then
-				data_p.async_result = AsyncResultType::BLOCKED;
-				return;
-			}
-			bool have_row_group = scan_result == AsyncResultType::HAVE_MORE_OUTPUT;
-			if (have_row_group) {
+			if (scan_result == AsyncResultType::HAVE_MORE_OUTPUT) {
 				l_state.row_groups_scanned++;
 			}
-
 			if (data_p.results_execution_mode == AsyncResultsExecutionMode::TASK_EXECUTOR) {
-				// We can avoid looping, and just return as appropriate
-				data_p.async_result = have_row_group ? AsyncResultType::HAVE_MORE_OUTPUT : AsyncResultType::FINISHED;
+				// report the scan outcome and let the executor drive the next step, rather than looping. On BLOCKED the
+				// source parked the scan (it copied our interrupt state and resumes us via a callback) - a taskless
+				// BLOCKED result suspends the pipeline task until then
+				data_p.async_result = scan_result;
 				return;
 			}
-			if (!have_row_group) {
+			// synchronous mode never hands out an interrupt state, so the source cannot block here
+			D_ASSERT(scan_result != AsyncResultType::BLOCKED);
+			if (scan_result == AsyncResultType::FINISHED) {
 				return;
 			}
 
-			// Before looping back, check if we are interrupted
+			// Before looping back to scan the assigned row group, check if we are interrupted
 			if (context.interrupted) {
 				throw InterruptException();
 			}

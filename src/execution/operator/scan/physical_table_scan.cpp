@@ -191,8 +191,9 @@ SourceResultType PhysicalTableScan::GetDataInternal(ExecutionContext &context, D
 		switch (output_async_result) {
 		case AsyncResultType::BLOCKED: {
 			if (!data.async_result.HasTasks()) {
-				// the function parked itself - it is resumed via the interrupt state we handed it (backported from
-				// main)
+				// the function parked itself - it is resumed via the interrupt state we handed it. It may only park
+				// when that interrupt state can call back
+				D_ASSERT(input.interrupt_state.CanCallback());
 				return SourceResultType::BLOCKED;
 			}
 			auto guard = g_state.Lock();
