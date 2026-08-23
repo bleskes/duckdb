@@ -174,7 +174,7 @@ TableScanOptions &CollectionScanState::GetOptions() {
 }
 
 ParallelCollectionScanState::ParallelCollectionScanState()
-    : collection(nullptr), current_row_group(nullptr), vector_index(0), max_row(0), processed_rows(0), batch_index(0) {
+    : collection(nullptr), current_row_group(nullptr), vector_index(0), max_row(0), batch_index(0), processed_rows(0) {
 }
 
 RowGroupScanResult ParallelCollectionScanState::NextRowGroup(optional_ptr<ClientContext> context,

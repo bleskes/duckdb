@@ -29,11 +29,7 @@ struct RowGroupScanSourceInfo;
 struct TableFunctionInitInput;
 struct TableScanBindData;
 
-//===--------------------------------------------------------------------===//
-// Results
-//===--------------------------------------------------------------------===//
-//! The result of pulling a row group out of a RowGroupScanSource. We reuse AsyncResultType: HAVE_MORE_OUTPUT means a
-//! row group was handed out, FINISHED means the scan is done, BLOCKED means the scan is parked (see Blocked())
+//! The result of pulling a row group out of a RowGroupScanSource
 struct RowGroupScanResult {
 	AsyncResultType type = AsyncResultType::FINISHED;
 	//! The row group to scan - only set for HAVE_MORE_OUTPUT
@@ -47,8 +43,6 @@ struct RowGroupScanResult {
 	//! InterruptState (i.e. the scan can be suspended)
 	DUCKDB_API static RowGroupScanResult Blocked();
 
-	//! Whether the result is internally consistent: a row group is set exactly for HAVE_MORE_OUTPUT. Meant to be
-	//! called under a D_ASSERT
 	bool Verify() const {
 		return (type == AsyncResultType::HAVE_MORE_OUTPUT) == static_cast<bool>(row_group);
 	}
@@ -157,9 +151,9 @@ struct RowGroupScanSources {
 //! operates on when it is initialized (RowGroupScanSourceInitInput::collection)
 struct RowGroupScanSourceInfo {
 	RowGroupScanSourceInfo(ClientContext &context, const TableScanBindData &bind_data, TableFunctionInitInput &input,
-	                       bool parallel, bool transaction_local, vector<StorageIndex> column_ids)
-	    : context(context), bind_data(bind_data), input(input), parallel(parallel),
-	      transaction_local(transaction_local), column_ids(std::move(column_ids)) {
+	                       bool transaction_local, vector<StorageIndex> column_ids)
+	    : context(context), bind_data(bind_data), input(input), transaction_local(transaction_local),
+	      column_ids(std::move(column_ids)) {
 	}
 
 	//! The context of the query that is scanning
@@ -168,8 +162,6 @@ struct RowGroupScanSourceInfo {
 	const TableScanBindData &bind_data;
 	//! The init input of the scan - holds the pushed-down filters, sample options and projection
 	TableFunctionInitInput &input;
-	//! Whether or not the source feeds a multi-threaded scan
-	bool parallel;
 	//! Whether this source feeds the transaction-local storage of the table (the uncommitted, in-memory row groups)
 	//! rather than its persistent storage. An adapter that only cares about persistent data can return `child`
 	//! unchanged here to avoid wrapping the handful of transaction-local row groups

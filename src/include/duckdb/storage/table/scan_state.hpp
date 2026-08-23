@@ -251,9 +251,7 @@ public:
 	//! The amount of tuples considered by a scan, before applying filters
 	idx_t rows_scanned = 0;
 
-	//! The source that hands out the row groups to scan. Either set before initializing the scan - in which case it
-	//! is initialized by the scan - or inherited from the parallel scan state that assigns row groups to this state,
-	//! in which case it has already been initialized. Defaults to handing out all row groups in storage order
+	//! The source that hands out the row groups to scan
 	shared_ptr<RowGroupScanSource> row_group_source;
 	//! The context of the query that is scanning (if any) - passed to the row group source
 	optional_ptr<ClientContext> context;
@@ -341,19 +339,13 @@ struct ParallelCollectionScanState {
 	//! The row group collection we are scanning
 	RowGroupCollection *collection;
 	shared_ptr<RowGroupSegmentTree> row_groups;
-	//! The row group currently being handed out (nullptr until the first row group is pulled from the source)
 	optional_ptr<SegmentNode<RowGroup>> current_row_group;
-	//! The vector index within current_row_group, only used when verify_parallelism is enabled
 	idx_t vector_index;
 	idx_t max_row;
-	atomic<idx_t> processed_rows;
-	//! Serializes pulling the next row group from the source together with allocating its batch index, so that the
-	//! batch index reflects the order in which row groups are handed out
-	mutex lock;
 	idx_t batch_index;
-
-	//! The source that hands out the row groups to scan (replaces the row group reorderer). Set before initializing
-	//! the scan, defaults to handing out all row groups in storage order. Shared with the scan states of all threads
+	atomic<idx_t> processed_rows;
+	mutex lock;
+	//! The source that hands out the row groups to scan
 	shared_ptr<RowGroupScanSource> row_group_source;
 };
 

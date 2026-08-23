@@ -6,9 +6,6 @@
 
 namespace duckdb {
 
-//===--------------------------------------------------------------------===//
-// RowGroupScanResult
-//===--------------------------------------------------------------------===//
 RowGroupScanResult RowGroupScanResult::WithRowGroup(SegmentNode<RowGroup> &row_group) {
 	RowGroupScanResult result;
 	result.type = AsyncResultType::HAVE_MORE_OUTPUT;
@@ -28,9 +25,6 @@ RowGroupScanResult RowGroupScanResult::Blocked() {
 	return result;
 }
 
-//===--------------------------------------------------------------------===//
-// RowGroupScanAssignment
-//===--------------------------------------------------------------------===//
 RowGroupScanAssignment RowGroupScanAssignment::RowGroupAssigned(idx_t rows) {
 	RowGroupScanAssignment result;
 	result.type = AsyncResultType::HAVE_MORE_OUTPUT;
@@ -50,15 +44,9 @@ RowGroupScanAssignment RowGroupScanAssignment::Blocked() {
 	return result;
 }
 
-//===--------------------------------------------------------------------===//
-// RowGroupScanSource
-//===--------------------------------------------------------------------===//
 RowGroupScanSource::~RowGroupScanSource() {
 }
 
-//===--------------------------------------------------------------------===//
-// Built-in sources
-//===--------------------------------------------------------------------===//
 namespace {
 
 //! Hands out the row groups of the collection in storage order
@@ -105,9 +93,6 @@ unique_ptr<RowGroupScanSource> RowGroupScanSources::Reordered(const RowGroupOrde
 	return std::move(result);
 }
 
-//===--------------------------------------------------------------------===//
-// RowGroupScanAdapter
-//===--------------------------------------------------------------------===//
 RowGroupScanAdapter::~RowGroupScanAdapter() {
 }
 

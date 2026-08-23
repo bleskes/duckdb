@@ -176,7 +176,7 @@ public:
 	AsyncResult async_result {};
 	AsyncResultsExecutionMode results_execution_mode {AsyncResultsExecutionMode::SYNCHRONOUS};
 	//! Interrupt state of the calling task, so the function can park and be woken up by returning a taskless BLOCKED
-	//! result (backported from main)
+	//! result
 	optional_ptr<const InterruptState> interrupt_state;
 };
 

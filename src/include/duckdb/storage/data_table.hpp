@@ -98,8 +98,9 @@ public:
 	RowGroupScanAssignment NextParallelScan(ClientContext &context, ParallelTableScanState &state,
 	                                        TableScanState &scan_state,
 	                                        optional_ptr<const InterruptState> interrupt_state);
-	//! Backwards-compatible overload used by extensions: returns the number of rows in the assigned row group (0 when
-	//! the scan is finished). The scan cannot be parked on this path
+	//! Backwards-compatible overload for out-of-tree extensions that call the pre-existing 3-argument signature (e.g.
+	//! the spatial extension's rtree index scan, rtree_index_scan.cpp). Returns the number of rows in the assigned row
+	//! group (0 when the scan is finished); the scan cannot be parked on this path
 	idx_t NextParallelScan(ClientContext &context, ParallelTableScanState &state, TableScanState &scan_state);
 
 	//! Scans up to STANDARD_VECTOR_SIZE elements from the table starting
