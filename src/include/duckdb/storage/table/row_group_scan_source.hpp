@@ -157,8 +157,9 @@ struct RowGroupScanSources {
 //! operates on when it is initialized (RowGroupScanSourceInitInput::collection)
 struct RowGroupScanSourceInfo {
 	RowGroupScanSourceInfo(ClientContext &context, const TableScanBindData &bind_data, TableFunctionInitInput &input,
-	                       bool parallel, vector<StorageIndex> column_ids)
-	    : context(context), bind_data(bind_data), input(input), parallel(parallel), column_ids(std::move(column_ids)) {
+	                       bool parallel, bool transaction_local, vector<StorageIndex> column_ids)
+	    : context(context), bind_data(bind_data), input(input), parallel(parallel),
+	      transaction_local(transaction_local), column_ids(std::move(column_ids)) {
 	}
 
 	//! The context of the query that is scanning
@@ -169,6 +170,10 @@ struct RowGroupScanSourceInfo {
 	TableFunctionInitInput &input;
 	//! Whether or not the source feeds a multi-threaded scan
 	bool parallel;
+	//! Whether this source feeds the transaction-local storage of the table (the uncommitted, in-memory row groups)
+	//! rather than its persistent storage. An adapter that only cares about persistent data can return `child`
+	//! unchanged here to avoid wrapping the handful of transaction-local row groups
+	bool transaction_local;
 	//! The columns that are being scanned
 	vector<StorageIndex> column_ids;
 };
@@ -178,7 +183,7 @@ struct RowGroupScanSourceInfo {
 //! runs after all built-in optimizers, so the full optimized plan is available when deciding whether to hook a scan.
 //!
 //! Wrap is called once per row group source of the scan: once for the persistent storage of the table, and once for
-//! its transaction-local storage.
+//! its transaction-local storage. The two are distinguished by RowGroupScanSourceInfo::transaction_local.
 class RowGroupScanAdapter {
 public:
 	DUCKDB_API virtual ~RowGroupScanAdapter();

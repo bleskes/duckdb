@@ -40,7 +40,8 @@ namespace duckdb {
 //! attached to this scan, so that they sit between the threads of the scan and the row groups that they read
 static shared_ptr<RowGroupScanSource> CreateRowGroupScanSource(ClientContext &context, TableFunctionInitInput &input,
                                                                const vector<StorageIndex> &column_ids,
-                                                               TransactionData transaction, bool parallel) {
+                                                               TransactionData transaction, bool parallel,
+                                                               bool transaction_local) {
 	auto &bind_data = input.bind_data->Cast<TableScanBindData>();
 	auto source = bind_data.order_options ? RowGroupScanSources::Reordered(*bind_data.order_options, transaction)
 	                                      : RowGroupScanSources::Storage();
@@ -48,7 +49,7 @@ static shared_ptr<RowGroupScanSource> CreateRowGroupScanSource(ClientContext &co
 		return std::move(source);
 	}
 
-	RowGroupScanSourceInfo info(context, bind_data, input, parallel, column_ids);
+	RowGroupScanSourceInfo info(context, bind_data, input, parallel, transaction_local, column_ids);
 	for (auto &adapter : bind_data.row_group_scan_adapters) {
 		source = adapter->Wrap(info, std::move(source));
 		if (!source) {
@@ -450,9 +451,9 @@ unique_ptr<GlobalTableFunctionState> DuckTableScanInitGlobal(ClientContext &cont
 	// one source per collection - the persistent storage of the table and its transaction-local storage. Each source
 	// is told which collection it operates on when it is initialized
 	g_state->state.scan_state.row_group_source =
-	    CreateRowGroupScanSource(context, input, storage_ids, transaction, true);
+	    CreateRowGroupScanSource(context, input, storage_ids, transaction, true, /* transaction_local */ false);
 	g_state->state.local_state.row_group_source =
-	    CreateRowGroupScanSource(context, input, storage_ids, transaction, true);
+	    CreateRowGroupScanSource(context, input, storage_ids, transaction, true, /* transaction_local */ true);
 
 	storage.InitializeParallelScan(context, g_state->state, input.column_indexes);
 	if (!input.CanRemoveFilterColumns()) {

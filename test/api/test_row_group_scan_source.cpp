@@ -25,6 +25,8 @@ enum class TestSourceMode {
 
 struct TestSourceStats {
 	atomic<idx_t> created {0};
+	atomic<idx_t> created_persistent {0};
+	atomic<idx_t> created_transaction_local {0};
 	atomic<idx_t> initialized {0};
 	atomic<idx_t> row_groups_handed_out {0};
 	atomic<idx_t> blocks {0};
@@ -119,9 +121,14 @@ public:
 
 	unique_ptr<RowGroupScanSource> Wrap(const RowGroupScanSourceInfo &info,
 	                                    unique_ptr<RowGroupScanSource> child) override {
-		// wrap every source of the scan - one per collection (persistent + transaction-local). A source that only
-		// wanted to act on one could inspect RowGroupScanSourceInitInput::collection when it is initialized
+		// wrap every source of the scan - one per collection (persistent + transaction-local). info.transaction_local
+		// tells them apart, so an adapter that only cares about persistent data could return `child` unchanged here
 		stats.created++;
+		if (info.transaction_local) {
+			stats.created_transaction_local++;
+		} else {
+			stats.created_persistent++;
+		}
 		auto result = make_uniq<TestRowGroupScanSource>(std::move(child), mode, stats);
 		return std::move(result);
 	}
@@ -187,6 +194,10 @@ TEST_CASE("Test row group scan source - reordering", "[api]") {
 	REQUIRE(result->RowCount() == row_count);
 	REQUIRE(stats.initialized == 1);
 	REQUIRE(stats.row_groups_handed_out == 3);
+	// Wrap is called once for the persistent storage source and once for the transaction-local one, and the two are
+	// told apart via RowGroupScanSourceInfo::transaction_local
+	REQUIRE(stats.created_persistent == 1);
+	REQUIRE(stats.created_transaction_local == 1);
 	// the last row group is scanned first
 	REQUIRE(result->GetValue(0, 0) == Value::BIGINT(NumericCast<int64_t>(2 * DEFAULT_ROW_GROUP_SIZE)));
 
