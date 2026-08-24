@@ -19,6 +19,7 @@ namespace duckdb {
 class AttachedDatabase;
 class Catalog;
 class DataTable;
+struct RowGroupScanSourceSetup;
 class StorageCommitState;
 class Transaction;
 class WriteAheadLog;
@@ -132,7 +133,8 @@ public:
 	//! Scan
 	void Scan(CollectionScanState &state, const vector<StorageIndex> &column_ids, DataChunk &result);
 
-	void InitializeParallelScan(DataTable &table, ParallelCollectionScanState &state);
+	void InitializeParallelScan(DataTable &table, ParallelCollectionScanState &state,
+	                            optional_ptr<const RowGroupScanSourceSetup> setup = nullptr);
 	AsyncResultType NextParallelScan(ClientContext &context, DataTable &table, ParallelCollectionScanState &state,
 	                                 CollectionScanState &scan_state,
 	                                 optional_ptr<const InterruptState> interrupt_state);

@@ -23,6 +23,7 @@ namespace duckdb {
 class ClientContext;
 class InterruptState;
 class RowGroupCollection;
+class RowGroupScanAdapter;
 class RowGroupSegmentTree;
 struct RowGroupOrderOptions;
 struct RowGroupScanSourceInfo;
@@ -54,17 +55,6 @@ struct RowGroupScanResult {
 //===--------------------------------------------------------------------===//
 // Row group scan source
 //===--------------------------------------------------------------------===//
-struct RowGroupScanSourceInitInput {
-	RowGroupScanSourceInitInput(RowGroupCollection &collection, shared_ptr<RowGroupSegmentTree> row_groups)
-	    : collection(collection), row_groups(std::move(row_groups)) {
-	}
-
-	//! The collection that is being scanned - the persistent storage of the table, or its transaction-local storage
-	RowGroupCollection &collection;
-	//! The segment tree holding the row groups of the collection. Sources that hand out row groups of the collection
-	//! must keep this alive for as long as they hand out row groups
-	shared_ptr<RowGroupSegmentTree> row_groups;
-};
 
 struct RowGroupScanSourceInput {
 	RowGroupScanSourceInput(optional_ptr<ClientContext> context, optional_ptr<const InterruptState> interrupt_state)
@@ -95,12 +85,6 @@ public:
 	DUCKDB_API virtual ~RowGroupScanSource();
 
 public:
-	//! Called exactly once, single-threaded, before any call to Next, by the scan state that creates the source.
-	//! Implementations that wrap a child source must forward this call. This may do bounded work (e.g. reading row
-	//! group statistics or computing an order), but it must not block: there is nothing to suspend during
-	//! initialization. Work that has to wait on something belongs in Next, which can return BLOCKED
-	virtual void Initialize(RowGroupScanSourceInitInput &input) = 0;
-
 	//! Hand out the next row group to scan. The scan serializes calls to Next (it holds a lock while pulling), so
 	//! implementations do not need to synchronize themselves. Do not perform long-running work here - return BLOCKED
 	//! instead, and hand out row groups once the work has completed
@@ -124,19 +108,41 @@ struct RowGroupScanSources {
 	//! if set, is the row group to resume after: the source hands out its successors, not the whole collection (used by
 	//! offset scans that are already positioned on a row group)
 	DUCKDB_API static unique_ptr<RowGroupScanSource>
-	Storage(optional_ptr<SegmentNode<RowGroup>> resume_after = nullptr);
+	Storage(shared_ptr<RowGroupSegmentTree> row_groups, optional_ptr<SegmentNode<RowGroup>> resume_after = nullptr);
 	//! Hands out row groups in the order dictated by the given order options, which are pushed into the scan by the
-	//! optimizer for queries that can be answered by scanning row groups in a specific order (e.g. ORDER BY + LIMIT)
+	//! optimizer for queries that can be answered by scanning row groups in a specific order (e.g. ORDER BY + LIMIT).
+	//! The order is computed up front, so all row groups of the collection must be present in row_groups
 	DUCKDB_API static unique_ptr<RowGroupScanSource> Reordered(const RowGroupOrderOptions &options,
-	                                                           TransactionData transaction);
+	                                                           TransactionData transaction,
+	                                                           shared_ptr<RowGroupSegmentTree> row_groups);
+};
+
+//! Everything InitializeParallelScan needs to build the row group source of a scan: the pushed-down order, the adapters
+//! attached by extensions, and the information the adapters read when they wrap the source. Built once by the table
+//! scan and handed to the storage layer, which constructs one source per collection (persistent + transaction-local)
+struct RowGroupScanSourceSetup {
+	//! In what order to hand out the row groups (null hands them out in storage order)
+	optional_ptr<const RowGroupOrderOptions> order_options;
+	//! The transaction of the scan, used to compute the order
+	TransactionData transaction;
+	//! The adapters that wrap the source, in the order they were added
+	const vector<shared_ptr<RowGroupScanAdapter>> &adapters;
+	//! The context of the query that is scanning
+	ClientContext &context;
+	//! The bind data of the scan
+	const TableScanBindData &bind_data;
+	//! The init input of the scan - holds the pushed-down filters, sample options and projection
+	TableFunctionInitInput &input;
+	//! The columns that are being scanned
+	vector<StorageIndex> column_ids;
 };
 
 //===--------------------------------------------------------------------===//
 // Row group scan adapter
 //===--------------------------------------------------------------------===//
-//! Describes the scan that a row group scan source is created for. Adapters read what they need from the scan's
-//! bind data and init input (e.g. the pushed-down filters and scan order); the source is told which collection it
-//! operates on when it is initialized (RowGroupScanSourceInitInput::collection)
+//! Describes the scan that a row group scan source is created for. Adapters read what they need from the scan's bind
+//! data and init input (e.g. the pushed-down filters and scan order), and transaction_local tells them whether they are
+//! wrapping the persistent or the transaction-local storage of the table
 struct RowGroupScanSourceInfo {
 	RowGroupScanSourceInfo(ClientContext &context, const TableScanBindData &bind_data, TableFunctionInitInput &input,
 	                       bool transaction_local, vector<StorageIndex> column_ids)

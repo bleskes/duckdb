@@ -32,11 +32,9 @@ namespace {
 //! Hands out the row groups of the collection in storage order
 class StorageRowGroupScanSource : public RowGroupScanSource {
 public:
-	explicit StorageRowGroupScanSource(optional_ptr<SegmentNode<RowGroup>> resume_after) : cursor(resume_after) {
-	}
-
-	void Initialize(RowGroupScanSourceInitInput &input) override {
-		row_groups = input.row_groups;
+	StorageRowGroupScanSource(shared_ptr<RowGroupSegmentTree> row_groups_p,
+	                          optional_ptr<SegmentNode<RowGroup>> resume_after)
+	    : row_groups(std::move(row_groups_p)), cursor(resume_after) {
 	}
 
 	RowGroupScanResult Next(RowGroupScanSourceInput &input) override {
@@ -63,15 +61,15 @@ private:
 
 } // namespace
 
-unique_ptr<RowGroupScanSource> RowGroupScanSources::Storage(optional_ptr<SegmentNode<RowGroup>> resume_after) {
-	auto result = make_uniq<StorageRowGroupScanSource>(resume_after);
-	return std::move(result);
+unique_ptr<RowGroupScanSource> RowGroupScanSources::Storage(shared_ptr<RowGroupSegmentTree> row_groups,
+                                                            optional_ptr<SegmentNode<RowGroup>> resume_after) {
+	return make_uniq<StorageRowGroupScanSource>(std::move(row_groups), resume_after);
 }
 
 unique_ptr<RowGroupScanSource> RowGroupScanSources::Reordered(const RowGroupOrderOptions &options,
-                                                              TransactionData transaction) {
-	auto result = make_uniq<RowGroupReorderer>(options, transaction);
-	return std::move(result);
+                                                              TransactionData transaction,
+                                                              shared_ptr<RowGroupSegmentTree> row_groups) {
+	return make_uniq<RowGroupReorderer>(options, transaction, std::move(row_groups));
 }
 
 RowGroupScanAdapter::~RowGroupScanAdapter() {

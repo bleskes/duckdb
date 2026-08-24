@@ -233,13 +233,29 @@ void RowGroupCollection::Verify() {
 //===--------------------------------------------------------------------===//
 namespace {
 
-//! Initialize the source that hands out the row groups of this scan. Every scan installs its source before calling this
-//! (the table scan installs a storage/reordered/adapter-wrapped source, sequential and offset scans install a
-//! storage-order source), so here the source learns which collection it operates on and does its up-front work
-void InitializeRowGroupScanSource(RowGroupCollection &collection, RowGroupScanSource &source,
-                                  shared_ptr<RowGroupSegmentTree> row_groups) {
-	RowGroupScanSourceInitInput input(collection, std::move(row_groups));
-	source.Initialize(input);
+//! Build the source that hands out the row groups of a parallel scan: the pushed-down order (or storage order),
+//! wrapped by the adapters that extensions attached. Called once per collection (persistent + transaction-local), so
+//! the source is fully constructed here - it already has the collection's row groups
+unique_ptr<RowGroupScanSource> BuildRowGroupScanSource(const shared_ptr<RowGroupSegmentTree> &row_groups,
+                                                       optional_ptr<const RowGroupScanSourceSetup> setup,
+                                                       bool transaction_local) {
+	unique_ptr<RowGroupScanSource> source =
+	    setup && setup->order_options
+	        ? RowGroupScanSources::Reordered(*setup->order_options, setup->transaction, row_groups)
+	        : RowGroupScanSources::Storage(row_groups);
+	if (!setup) {
+		return source;
+	}
+	// let each adapter wrap the source, so extensions can reorder / filter / replace / block the row groups
+	RowGroupScanSourceInfo info(setup->context, setup->bind_data, setup->input, transaction_local, setup->column_ids);
+	for (auto &adapter : setup->adapters) {
+		source = adapter->Wrap(info, std::move(source));
+		if (!source) {
+			throw InternalException("RowGroupScanAdapter \"%s\" did not return a row group scan source",
+			                        adapter->Name());
+		}
+	}
+	return source;
 }
 
 } // namespace
@@ -251,8 +267,7 @@ void RowGroupCollection::InitializeScan(const QueryContext &context, CollectionS
 	state.max_row = state.row_groups->GetBaseRowId() + total_rows;
 	state.Initialize(context, GetTypes());
 	// sequential scans hand out row groups in storage order
-	state.row_group_source = RowGroupScanSources::Storage();
-	InitializeRowGroupScanSource(*this, *state.row_group_source, state.row_groups);
+	state.row_group_source = RowGroupScanSources::Storage(state.row_groups);
 	auto row_group = state.GetNextRowGroup();
 	while (row_group && !row_group->GetNode().InitializeScan(state, *row_group)) {
 		row_group = state.GetNextRowGroup();
@@ -274,8 +289,7 @@ void RowGroupCollection::InitializeScanWithOffset(const QueryContext &context, C
 	state.Initialize(context, GetTypes());
 	// install a storage-order source that resumes after this row group, so the scan advances through the same
 	// RowGroupScanSource as every other scan (GetNextRowGroup) rather than walking the segment tree directly
-	state.row_group_source = RowGroupScanSources::Storage(row_group);
-	InitializeRowGroupScanSource(*this, *state.row_group_source, state.row_groups);
+	state.row_group_source = RowGroupScanSources::Storage(state.row_groups, row_group);
 	idx_t start_vector = (start_row - row_group->GetRowStart()) / STANDARD_VECTOR_SIZE;
 	if (!row_group->GetNode().InitializeScanWithOffset(state, *row_group, start_vector)) {
 		throw InternalException("Failed to initialize row group scan with offset");
@@ -294,19 +308,16 @@ bool RowGroupCollection::InitializeScanInRowGroup(ClientContext &context, Collec
 	return row_group.GetNode().InitializeScanWithOffset(state, row_group, vector_index);
 }
 
-void RowGroupCollection::InitializeParallelScan(ParallelCollectionScanState &state) {
+void RowGroupCollection::InitializeParallelScan(ParallelCollectionScanState &state,
+                                                optional_ptr<const RowGroupScanSourceSetup> setup,
+                                                bool transaction_local) {
 	state.collection = this;
 	state.row_groups = GetRowGroups();
-	// The table scan installs the source (storage/reordered/adapter-wrapped) before starting the parallel scan. Callers
-	// that do not install one get a storage-order source: out-of-tree extensions (e.g. the spatial extension's rtree
-	// index scan) call DataTable::InitializeParallelScan directly, bypassing table_scan.cpp, so they never set it -
-	// defaulting here keeps that path working (and matches the pre-existing behavior) instead of dereferencing a null
-	// source. We do not pull the first row group here: the source might block, and we cannot suspend during init -
-	// NextParallelScan pulls it
-	if (!state.row_group_source) {
-		state.row_group_source = RowGroupScanSources::Storage();
-	}
-	InitializeRowGroupScanSource(*this, *state.row_group_source, state.row_groups);
+	// build the source that hands out the row groups: storage order (or the pushed-down order), wrapped by the
+	// adapters from setup. setup is null for callers that just want a storage-order scan - e.g. out-of-tree extensions
+	// (the spatial rtree index scan) that call DataTable::InitializeParallelScan directly. We do not pull the first row
+	// group here: the source might block, and we cannot suspend during init - NextParallelScan pulls it
+	state.row_group_source = BuildRowGroupScanSource(state.row_groups, setup, transaction_local);
 	state.current_row_group = nullptr;
 	state.vector_index = 0;
 	state.max_row = state.row_groups->GetBaseRowId() + total_rows;

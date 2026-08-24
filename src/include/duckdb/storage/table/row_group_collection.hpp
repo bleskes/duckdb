@@ -21,6 +21,8 @@ namespace duckdb {
 
 struct ParallelTableScanState;
 struct ParallelCollectionScanState;
+struct RowGroupScanSourceSetup;
+class InterruptState;
 class CreateIndexScanState;
 class CollectionScanState;
 class PersistentTableData;
@@ -79,7 +81,11 @@ public:
 	static bool InitializeScanInRowGroup(ClientContext &context, CollectionScanState &state,
 	                                     RowGroupCollection &collection, SegmentNode<RowGroup> &row_group,
 	                                     idx_t vector_index, idx_t max_row);
-	void InitializeParallelScan(ParallelCollectionScanState &state);
+	//! Build the row group source of this collection's parallel scan from setup (null = storage order, no adapters).
+	//! transaction_local tells the adapters whether this is the table's transaction-local storage
+	void InitializeParallelScan(ParallelCollectionScanState &state,
+	                            optional_ptr<const RowGroupScanSourceSetup> setup = nullptr,
+	                            bool transaction_local = false);
 	//! Assign the next row group to the given scan state. On HAVE_MORE_OUTPUT the assigned row group is set on the scan
 	//! state; returns BLOCKED if the row group source parked the scan, FINISHED when there is nothing left to scan
 	AsyncResultType NextParallelScan(ClientContext &context, ParallelCollectionScanState &state,

@@ -35,28 +35,6 @@
 
 namespace duckdb {
 
-//! Create the RowGroupSource for this scan, optimizing for ordering and including any extension customization.
-static shared_ptr<RowGroupScanSource> CreateRowGroupScanSource(ClientContext &context, TableFunctionInitInput &input,
-                                                               const vector<StorageIndex> &column_ids,
-                                                               TransactionData transaction, bool transaction_local) {
-	auto &bind_data = input.bind_data->Cast<TableScanBindData>();
-	auto source = bind_data.order_options ? RowGroupScanSources::Reordered(*bind_data.order_options, transaction)
-	                                      : RowGroupScanSources::Storage();
-	if (bind_data.row_group_scan_adapters.empty()) {
-		return std::move(source);
-	}
-
-	RowGroupScanSourceInfo info(context, bind_data, input, transaction_local, column_ids);
-	for (auto &adapter : bind_data.row_group_scan_adapters) {
-		source = adapter->Wrap(info, std::move(source));
-		if (!source) {
-			throw InternalException("RowGroupScanAdapter \"%s\" did not return a row group scan source",
-			                        adapter->Name());
-		}
-	}
-	return std::move(source);
-}
-
 struct TableScanLocalState : public LocalTableFunctionState {
 	//! The current position in the scan.
 	TableScanState scan_state;
@@ -436,14 +414,12 @@ unique_ptr<GlobalTableFunctionState> DuckTableScanInitGlobal(ClientContext &cont
 		storage_ids.push_back(bind_data.table.GetStorageIndex(col));
 	}
 	auto transaction = TransactionData(DuckTransaction::Get(context, storage.GetAttached()));
-	// one source per collection - the persistent storage of the table and its transaction-local storage. Each source
-	// is told which collection it operates on when it is initialized
-	g_state->state.scan_state.row_group_source =
-	    CreateRowGroupScanSource(context, input, storage_ids, transaction, /* transaction_local */ false);
-	g_state->state.local_state.row_group_source =
-	    CreateRowGroupScanSource(context, input, storage_ids, transaction, /* transaction_local */ true);
-
-	storage.InitializeParallelScan(context, g_state->state, input.column_indexes);
+	// describe the row group source of this scan: the pushed-down order and the extension adapters.
+	// InitializeParallelScan builds one source per collection (persistent + transaction-local) from this
+	RowGroupScanSourceSetup setup {
+	    bind_data.order_options.get(), transaction, bind_data.row_group_scan_adapters, context, bind_data, input,
+	    std::move(storage_ids)};
+	storage.InitializeParallelScan(context, g_state->state, input.column_indexes, setup);
 	if (!input.CanRemoveFilterColumns()) {
 		return std::move(g_state);
 	}

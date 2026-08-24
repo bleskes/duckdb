@@ -203,13 +203,10 @@ OffsetPruningResult FindOffsetPrunableChunks(It it, End end, const OrderByStatis
 
 } // namespace
 
-RowGroupReorderer::RowGroupReorderer(const RowGroupOrderOptions &options_p, TransactionData transaction_p)
-    : options(options_p), transaction(transaction_p), next_index(0) {
-}
-
-void RowGroupReorderer::Initialize(RowGroupScanSourceInitInput &input) {
-	D_ASSERT(!row_groups);
-	row_groups = input.row_groups;
+RowGroupReorderer::RowGroupReorderer(const RowGroupOrderOptions &options_p, TransactionData transaction_p,
+                                     shared_ptr<RowGroupSegmentTree> row_groups_p)
+    : options(options_p), transaction(transaction_p), row_groups(std::move(row_groups_p)), next_index(0) {
+	D_ASSERT(row_groups);
 	ComputeOrder(*row_groups);
 }
 

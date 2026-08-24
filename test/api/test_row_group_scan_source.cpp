@@ -36,13 +36,9 @@ class TestRowGroupScanSource : public RowGroupScanSource {
 public:
 	TestRowGroupScanSource(unique_ptr<RowGroupScanSource> child_p, TestSourceMode mode, TestSourceStats &stats)
 	    : child(std::move(child_p)), mode(mode), stats(stats) {
-	}
-
-public:
-	void Initialize(RowGroupScanSourceInitInput &input) override {
-		child->Initialize(input);
-		// drain the child - this is what a source that sorts or filters row groups does. The built-in child sources
-		// never block, so we pull them out directly with no context and no interrupt state
+		// drain the child up front - this is what a source that sorts or filters row groups does. The child is already
+		// fully constructed (it has the collection's row groups), and the built-in child sources never block, so we
+		// pull them out directly with no context and no interrupt state
 		RowGroupScanSourceInput next_input(nullptr, nullptr);
 		while (true) {
 			auto result = child->Next(next_input);
@@ -59,6 +55,7 @@ public:
 		stats.initialized++;
 	}
 
+public:
 	RowGroupScanResult Next(RowGroupScanSourceInput &input) override {
 		if (mode == TestSourceMode::BLOCK_ONCE && TryBlockOnce(input)) {
 			return RowGroupScanResult::Blocked();
@@ -194,10 +191,10 @@ TEST_CASE("Test row group scan source - reordering", "[api]") {
 	REQUIRE(result->RowCount() == row_count);
 	REQUIRE(stats.initialized == 1);
 	REQUIRE(stats.row_groups_handed_out == 3);
-	// Wrap is called once for the persistent storage source and once for the transaction-local one, and the two are
-	// told apart via RowGroupScanSourceInfo::transaction_local
+	// the source is built (and the adapter wraps it) per collection that exists at scan setup. This query has no
+	// transaction-local storage, so only the persistent source is wrapped (info.transaction_local tells them apart)
 	REQUIRE(stats.created_persistent == 1);
-	REQUIRE(stats.created_transaction_local == 1);
+	REQUIRE(stats.created_transaction_local == 0);
 	// the last row group is scanned first
 	REQUIRE(result->GetValue(0, 0) == Value::BIGINT(NumericCast<int64_t>(2 * DEFAULT_ROW_GROUP_SIZE)));
 

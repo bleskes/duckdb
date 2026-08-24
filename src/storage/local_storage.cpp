@@ -377,16 +377,17 @@ void LocalStorage::Scan(CollectionScanState &state, const vector<StorageIndex> &
 	state.Scan(transaction, result);
 }
 
-void LocalStorage::InitializeParallelScan(DataTable &table, ParallelCollectionScanState &state) {
+void LocalStorage::InitializeParallelScan(DataTable &table, ParallelCollectionScanState &state,
+                                          optional_ptr<const RowGroupScanSourceSetup> setup) {
 	auto storage = table_manager.GetStorage(table);
 	if (!storage) {
 		state.max_row = 0;
 		state.current_row_group = nullptr;
 		state.vector_index = 0;
-		// there is no transaction-local storage to scan - drop the source, if any, so that we never pull from it
+		// there is no transaction-local storage to scan - leave the source unset so NextParallelScan hands out nothing
 		state.row_group_source.reset();
 	} else {
-		storage->GetCollection().InitializeParallelScan(state);
+		storage->GetCollection().InitializeParallelScan(state, setup, /* transaction_local */ true);
 	}
 }
 

@@ -53,10 +53,11 @@ struct OffsetPruningResult {
 //! once during Initialize; handing out row groups afterwards is lock-free
 class RowGroupReorderer : public RowGroupScanSource {
 public:
-	RowGroupReorderer(const RowGroupOrderOptions &options_p, TransactionData transaction_p);
+	//! Computes the order up front, so row_groups must hold all row groups of the collection
+	RowGroupReorderer(const RowGroupOrderOptions &options_p, TransactionData transaction_p,
+	                  shared_ptr<RowGroupSegmentTree> row_groups_p);
 
 public:
-	void Initialize(RowGroupScanSourceInitInput &input) override;
 	RowGroupScanResult Next(RowGroupScanSourceInput &input) override;
 
 	static Value RetrieveStat(const BaseStatistics &stats, OrderByStatistics order_by, OrderByColumnType column_type);
@@ -75,7 +76,7 @@ private:
 
 	//! The segment tree we hand out row groups of - kept alive for as long as we do
 	shared_ptr<RowGroupSegmentTree> row_groups;
-	//! The row groups in the order in which they are handed out - immutable after Initialize
+	//! The row groups in the order in which they are handed out - immutable after construction
 	vector<reference<SegmentNode<RowGroup>>> ordered_row_groups;
 	//! The index of the next row group to hand out (Next is called serialized, so this needs no synchronization)
 	idx_t next_index;
