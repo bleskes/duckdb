@@ -116,12 +116,12 @@ public:
 		return "test_row_group_scan_source";
 	}
 
-	unique_ptr<RowGroupScanSource> Wrap(ClientContext &context, bool transaction_local,
+	unique_ptr<RowGroupScanSource> Wrap(ClientContext &context, const RowGroupScanInfo &info,
 	                                    unique_ptr<RowGroupScanSource> child) override {
-		// wrap the source of each collection that exists at scan setup. transaction_local tells the persistent and the
-		// transaction-local storage apart, so an adapter that only cares about persistent data could return `child`
+		// wrap the source of each collection that exists at scan setup. info.transaction_local tells the persistent and
+		// the transaction-local storage apart, so an adapter that only cares about persistent data could return `child`
 		stats.created++;
-		if (transaction_local) {
+		if (info.transaction_local) {
 			stats.created_transaction_local++;
 		} else {
 			stats.created_persistent++;

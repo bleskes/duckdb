@@ -24,6 +24,7 @@ class ClientContext;
 class InterruptState;
 class RowGroupCollection;
 class RowGroupSegmentTree;
+class TableFilterSet;
 struct RowGroupOrderOptions;
 
 //! The result of pulling a row group out of a RowGroupScanSource
@@ -116,13 +117,22 @@ struct RowGroupScanSources {
 //===--------------------------------------------------------------------===//
 // Row group scan adapter
 //===--------------------------------------------------------------------===//
+//! What a scan tells its row group scan adapters about itself
+struct RowGroupScanInfo {
+	//! True when wrapping the table's transaction-local storage rather than its persistent storage
+	bool transaction_local = false;
+	//! The filters the scan will apply - the final set, including filters pushed in dynamically at execution time
+	optional_ptr<TableFilterSet> filters;
+	//! The columns being scanned
+	const vector<StorageIndex> *column_ids = nullptr;
+};
+
 //! An adapter allows an extension to sit between the threads of a table scan and the row groups that the scan reads.
 //! Adapters are attached to a LogicalGet by an optimizer extension (see LogicalGet::AddRowGroupScanAdapter), which
 //! runs after all built-in optimizers, so the full optimized plan is available when deciding whether to hook a scan.
-//! An adapter captures what it needs about the query (table, filters, columns) when it is constructed.
 //!
 //! Wrap is called once per row group source of the scan: once for the persistent storage of the table, and once for
-//! its transaction-local storage. The two are distinguished by the transaction_local flag.
+//! its transaction-local storage. The two are distinguished by RowGroupScanInfo::transaction_local.
 class RowGroupScanAdapter {
 public:
 	DUCKDB_API virtual ~RowGroupScanAdapter();
@@ -131,10 +141,9 @@ public:
 	//! The name of this adapter, used in error messages
 	virtual string Name() const = 0;
 	//! Wrap the source that the scan pulls its row groups from. `child` is the source that DuckDB would otherwise have
-	//! used - either the storage-order source, or the source implementing the pushed-down row group order.
-	//! transaction_local is true when wrapping the table's transaction-local storage. Return `child` unchanged to stay
-	//! out of this scan
-	virtual unique_ptr<RowGroupScanSource> Wrap(ClientContext &context, bool transaction_local,
+	//! used - either the storage-order source, or the source implementing the pushed-down row group order. Return
+	//! `child` unchanged to stay out of this scan
+	virtual unique_ptr<RowGroupScanSource> Wrap(ClientContext &context, const RowGroupScanInfo &info,
 	                                            unique_ptr<RowGroupScanSource> child) = 0;
 };
 

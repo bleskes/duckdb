@@ -410,9 +410,19 @@ unique_ptr<GlobalTableFunctionState> DuckTableScanInitGlobal(ClientContext &cont
 	auto g_state = make_uniq<DuckTableScanState>(context, input.bind_data.get());
 
 	// InitializeParallelScan builds the row group source of each collection (persistent + transaction-local) from the
-	// pushed-down scan order and the adapters that extensions attached to this scan
+	// pushed-down scan order and the adapters that extensions attached to this scan. The adapters are told about the
+	// scan (filters, columns) via scan_info; only build it when there are adapters to wrap
+	RowGroupScanInfo scan_info;
+	vector<StorageIndex> storage_ids;
+	if (!bind_data.row_group_scan_adapters.empty()) {
+		for (auto &col : input.column_indexes) {
+			storage_ids.push_back(bind_data.table.GetStorageIndex(col));
+		}
+		scan_info.filters = input.filters;
+		scan_info.column_ids = &storage_ids;
+	}
 	storage.InitializeParallelScan(context, g_state->state, input.column_indexes, bind_data.order_options.get(),
-	                               bind_data.row_group_scan_adapters);
+	                               bind_data.row_group_scan_adapters, scan_info);
 	if (!input.CanRemoveFilterColumns()) {
 		return std::move(g_state);
 	}

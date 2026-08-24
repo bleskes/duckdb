@@ -379,7 +379,8 @@ void LocalStorage::Scan(CollectionScanState &state, const vector<StorageIndex> &
 
 void LocalStorage::InitializeParallelScan(ClientContext &context, DataTable &table, ParallelCollectionScanState &state,
                                           optional_ptr<const RowGroupOrderOptions> order_options,
-                                          const vector<shared_ptr<RowGroupScanAdapter>> &adapters) {
+                                          const vector<shared_ptr<RowGroupScanAdapter>> &adapters,
+                                          const RowGroupScanInfo &scan_info) {
 	auto storage = table_manager.GetStorage(table);
 	if (!storage) {
 		state.max_row = 0;
@@ -388,7 +389,7 @@ void LocalStorage::InitializeParallelScan(ClientContext &context, DataTable &tab
 		// there is no transaction-local storage to scan - leave the source unset so NextParallelScan hands out nothing
 		state.row_group_source.reset();
 	} else {
-		storage->GetCollection().InitializeParallelScan(context, state, order_options, adapters,
+		storage->GetCollection().InitializeParallelScan(context, state, order_options, adapters, scan_info,
 		                                                /* transaction_local */ true);
 	}
 }
