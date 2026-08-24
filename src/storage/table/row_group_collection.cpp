@@ -297,10 +297,15 @@ bool RowGroupCollection::InitializeScanInRowGroup(ClientContext &context, Collec
 void RowGroupCollection::InitializeParallelScan(ParallelCollectionScanState &state) {
 	state.collection = this;
 	state.row_groups = GetRowGroups();
-	// the table scan installs the source (storage/reordered/adapter-wrapped) before starting the parallel scan. We do
-	// not pull the first row group here: the source might block, and we cannot suspend during init - NextParallelScan
-	// pulls it
-	D_ASSERT(state.row_group_source);
+	// The table scan installs the source (storage/reordered/adapter-wrapped) before starting the parallel scan. Callers
+	// that do not install one get a storage-order source: out-of-tree extensions (e.g. the spatial extension's rtree
+	// index scan) call DataTable::InitializeParallelScan directly, bypassing table_scan.cpp, so they never set it -
+	// defaulting here keeps that path working (and matches the pre-existing behavior) instead of dereferencing a null
+	// source. We do not pull the first row group here: the source might block, and we cannot suspend during init -
+	// NextParallelScan pulls it
+	if (!state.row_group_source) {
+		state.row_group_source = RowGroupScanSources::Storage();
+	}
 	InitializeRowGroupScanSource(*this, *state.row_group_source, state.row_groups);
 	state.current_row_group = nullptr;
 	state.vector_index = 0;
