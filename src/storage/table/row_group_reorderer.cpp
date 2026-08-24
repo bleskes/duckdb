@@ -207,15 +207,22 @@ OffsetPruningResult FindOffsetPrunableChunks(It it, const End &end, const OrderB
 } // namespace
 
 RowGroupReorderer::RowGroupReorderer(const RowGroupOrderOptions &options_p, TransactionData transaction_p)
-    : options(options_p), transaction(transaction_p), offset(0), initialized(false) {
+    : options(options_p), transaction(transaction_p), next_index(0) {
 }
 
-optional_ptr<SegmentNode<RowGroup>> RowGroupReorderer::GetNextRowGroup(SegmentNode<RowGroup> &row_group) {
-	D_ASSERT(RefersToSameObject(ordered_row_groups[offset].get(), row_group));
-	if (offset >= ordered_row_groups.size() - 1) {
-		return nullptr;
+void RowGroupReorderer::Initialize(RowGroupScanSourceInitInput &input) {
+	D_ASSERT(!row_groups);
+	row_groups = input.row_groups;
+	ComputeOrder(*row_groups);
+}
+
+RowGroupScanResult RowGroupReorderer::Next(RowGroupScanSourceInput &input) {
+	D_ASSERT(row_groups);
+	const auto index = next_index++;
+	if (index >= ordered_row_groups.size()) {
+		return RowGroupScanResult::Finished();
 	}
-	return ordered_row_groups[++offset].get();
+	return RowGroupScanResult::WithRowGroup(ordered_row_groups[index].get());
 }
 
 Value RowGroupReorderer::RetrieveStat(const BaseStatistics &stats, OrderByStatistics order_by,
@@ -326,16 +333,7 @@ OffsetPruningResult RowGroupReorderer::GetOffsetAfterPruning(const OrderByStatis
 	}
 }
 
-optional_ptr<SegmentNode<RowGroup>> RowGroupReorderer::GetRootSegment(RowGroupSegmentTree &row_groups) {
-	if (initialized) {
-		if (ordered_row_groups.empty()) {
-			return nullptr;
-		}
-		return ordered_row_groups[0].get();
-	}
-
-	initialized = true;
-
+void RowGroupReorderer::ComputeOrder(RowGroupSegmentTree &row_groups) {
 	vector<reference<SegmentNode<RowGroup>>> null_only_groups;
 	vector<reference<SegmentNode<RowGroup>>> ambiguous_groups;
 	multimap<Value, RowGroupSegmentNodeEntry> row_group_map;
@@ -376,12 +374,6 @@ optional_ptr<SegmentNode<RowGroup>> RowGroupReorderer::GetRootSegment(RowGroupSe
 			AppendRowGroups(null_only_groups, 0, ordered_row_groups);
 		}
 	}
-
-	if (ordered_row_groups.empty()) {
-		return nullptr;
-	}
-
-	return ordered_row_groups[0].get();
 }
 
 } // namespace duckdb

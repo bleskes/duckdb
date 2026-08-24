@@ -14,6 +14,7 @@
 #include "duckdb/storage/table/table_statistics.hpp"
 #include "duckdb/storage/storage_index.hpp"
 #include "duckdb/common/enums/column_segment_info_scan_type.hpp"
+#include "duckdb/common/enums/operator_result_type.hpp"
 #include "duckdb/common/enums/index_removal_type.hpp"
 #include "duckdb/common/enums/row_group_append_mode.hpp"
 
@@ -22,6 +23,7 @@ namespace duckdb {
 struct ParallelTableScanState;
 struct ParallelCollectionScanState;
 class CreateIndexScanState;
+class InterruptState;
 class CollectionScanState;
 class PersistentTableData;
 class TableDataWriter;
@@ -104,7 +106,11 @@ public:
 	                                     RowGroupCollection &collection, SegmentNode<RowGroup> &row_group,
 	                                     idx_t vector_index, idx_t max_row);
 	void InitializeParallelScan(ParallelCollectionScanState &state);
-	bool NextParallelScan(ClientContext &context, ParallelCollectionScanState &state, CollectionScanState &scan_state);
+	//! Assign the next row group to the given scan state. On HAVE_MORE_OUTPUT the assigned row group is set on the scan
+	//! state; returns BLOCKED if the row group source parked the scan, FINISHED when there is nothing left to scan
+	AsyncResultType NextParallelScan(ClientContext &context, ParallelCollectionScanState &state,
+	                                 CollectionScanState &scan_state,
+	                                 optional_ptr<const InterruptState> interrupt_state);
 
 	RowGroupIterationHelper Chunks(DuckTransaction &transaction);
 	RowGroupIterationHelper Chunks(DuckTransaction &transaction, const vector<StorageIndex> &column_ids);

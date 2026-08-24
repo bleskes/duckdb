@@ -208,26 +208,13 @@ ParallelCollectionScanState::ParallelCollectionScanState()
     : collection(nullptr), current_row_group(nullptr), processed_rows(0) {
 }
 
-void ParallelCollectionScanState::AssignRowGroup(optional_ptr<SegmentNode<RowGroup>> row_group) {
-	current_row_group = row_group;
-	while (current_row_group && !ShouldScanPartition(*current_row_group)) {
-		current_row_group = GetNextRowGroup(*row_groups, *current_row_group).get();
-	}
-}
-
-optional_ptr<SegmentNode<RowGroup>> ParallelCollectionScanState::GetRootSegment(RowGroupSegmentTree &row_groups) const {
-	if (reorderer) {
-		return reorderer->GetRootSegment(row_groups);
-	}
-	return row_groups.GetRootSegment();
-}
-
-optional_ptr<SegmentNode<RowGroup>>
-ParallelCollectionScanState::GetNextRowGroup(RowGroupSegmentTree &row_groups, SegmentNode<RowGroup> &row_group) const {
-	if (reorderer) {
-		return reorderer->GetNextRowGroup(row_group);
-	}
-	return row_groups.GetNextSegment(row_group);
+RowGroupScanResult ParallelCollectionScanState::NextRowGroup(optional_ptr<ClientContext> context,
+                                                             optional_ptr<const InterruptState> interrupt_state) const {
+	D_ASSERT(row_group_source);
+	RowGroupScanSourceInput input(context, interrupt_state);
+	auto result = row_group_source->Next(input);
+	D_ASSERT(result.Verify());
+	return result;
 }
 
 CollectionScanState::CollectionScanState(TableScanState &parent_p)
@@ -235,24 +222,30 @@ CollectionScanState::CollectionScanState(TableScanState &parent_p)
       valid_sel(STANDARD_VECTOR_SIZE), random(-1), parent(parent_p) {
 }
 
-optional_ptr<SegmentNode<RowGroup>> CollectionScanState::GetNextRowGroup(SegmentNode<RowGroup> &row_group) const {
-	if (reorderer) {
-		return reorderer->GetNextRowGroup(row_group);
+optional_ptr<SegmentNode<RowGroup>> CollectionScanState::GetNextRowGroup() {
+	if (!row_group_source) {
+		// no source installed - e.g. an offset scan positioned directly on the segment tree. Walk in storage order
+		return row_group ? row_groups->GetNextSegment(*row_group) : nullptr;
 	}
-	return row_groups->GetNextSegment(row_group);
+	// the sequential scan path has no pipeline task to suspend, so it passes no InterruptState: a source may not block
+	// here. Only the built-in sources reach this path today, and they never block
+	RowGroupScanSourceInput input(context.GetClientContext(), nullptr);
+	auto result = row_group_source->Next(input);
+	D_ASSERT(result.Verify());
+	switch (result.type) {
+	case AsyncResultType::HAVE_MORE_OUTPUT:
+		return result.row_group;
+	case AsyncResultType::FINISHED:
+		return nullptr;
+	default:
+		throw InternalException("A row group scan source blocked on a scan that cannot be suspended");
+	}
 }
 
 optional_ptr<SegmentNode<RowGroup>> CollectionScanState::GetNextRowGroup(SegmentLock &l,
                                                                          SegmentNode<RowGroup> &row_group) const {
-	D_ASSERT(!reorderer);
+	// scanning under a segment lock (index creation, checkpointing) always walks in storage order, ignoring the source
 	return row_groups->GetNextSegment(l, row_group);
-}
-
-optional_ptr<SegmentNode<RowGroup>> CollectionScanState::GetRootSegment() const {
-	if (reorderer) {
-		return reorderer->GetRootSegment(*row_groups);
-	}
-	return row_groups->GetRootSegment();
 }
 
 bool CollectionScanState::Scan(DuckTransaction &transaction, DataChunk &result) {
@@ -266,7 +259,7 @@ bool CollectionScanState::Scan(DuckTransaction &transaction, DataChunk &result) 
 			return false;
 		}
 		do {
-			row_group = GetNextRowGroup(*row_group).get();
+			row_group = GetNextRowGroup().get();
 			if (row_group) {
 				if (row_group->GetRowStart() >= max_row) {
 					row_group = nullptr;
@@ -289,11 +282,13 @@ bool CollectionScanState::Scan(DataChunk &result, TableScanType type, optional_p
 		if (result.size() > 0) {
 			return true;
 		}
-		// move to the next row group
+		// this variant is used by create-index and checkpoint scans, which must see every row group in storage order
+		// and are not bounded by max_row. Walk the segment tree directly rather than pulling from the row group source
+		// (the source is driven per-row-group by NextParallelScan, and its cursor/max_row would not line up here)
 		if (l) {
 			row_group = GetNextRowGroup(*l, *row_group).get();
 		} else {
-			row_group = GetNextRowGroup(*row_group).get();
+			row_group = row_groups->GetNextSegment(*row_group).get();
 		}
 		if (row_group) {
 			row_group->GetNode().InitializeScan(*this, *row_group);
