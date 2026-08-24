@@ -47,7 +47,8 @@ struct ColumnFetchState;
 struct DataTableInfo;
 struct LocalAppendState;
 struct ParallelTableScanState;
-struct RowGroupScanSourceSetup;
+struct RowGroupOrderOptions;
+class RowGroupScanAdapter;
 struct TableAppendState;
 class CommitDropState;
 
@@ -94,7 +95,8 @@ public:
 	idx_t MaxThreads(ClientContext &context) const;
 	void InitializeParallelScan(ClientContext &context, ParallelTableScanState &state,
 	                            const vector<ColumnIndex> &column_indexes,
-	                            optional_ptr<const RowGroupScanSourceSetup> setup = nullptr);
+	                            optional_ptr<const RowGroupOrderOptions> order_options = nullptr,
+	                            const vector<shared_ptr<RowGroupScanAdapter>> &adapters = {});
 	//! Assign the next row group to scan to the given scan state. On HAVE_MORE_OUTPUT the row group is set on the scan
 	//! state; on BLOCKED the row group source parked the scan and the caller must suspend it (the source resumes it via
 	//! the interrupt_state it was handed)

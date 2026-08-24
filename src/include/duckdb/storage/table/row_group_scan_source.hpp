@@ -23,12 +23,8 @@ namespace duckdb {
 class ClientContext;
 class InterruptState;
 class RowGroupCollection;
-class RowGroupScanAdapter;
 class RowGroupSegmentTree;
 struct RowGroupOrderOptions;
-struct RowGroupScanSourceInfo;
-struct TableFunctionInitInput;
-struct TableScanBindData;
 
 //! The result of pulling a row group out of a RowGroupScanSource
 struct RowGroupScanResult {
@@ -117,59 +113,16 @@ struct RowGroupScanSources {
 	                                                           shared_ptr<RowGroupSegmentTree> row_groups);
 };
 
-//! Everything InitializeParallelScan needs to build the row group source of a scan: the pushed-down order, the adapters
-//! attached by extensions, and the information the adapters read when they wrap the source. Built once by the table
-//! scan and handed to the storage layer, which constructs one source per collection (persistent + transaction-local)
-struct RowGroupScanSourceSetup {
-	//! In what order to hand out the row groups (null hands them out in storage order)
-	optional_ptr<const RowGroupOrderOptions> order_options;
-	//! The transaction of the scan, used to compute the order
-	TransactionData transaction;
-	//! The adapters that wrap the source, in the order they were added
-	const vector<shared_ptr<RowGroupScanAdapter>> &adapters;
-	//! The context of the query that is scanning
-	ClientContext &context;
-	//! The bind data of the scan
-	const TableScanBindData &bind_data;
-	//! The init input of the scan - holds the pushed-down filters, sample options and projection
-	TableFunctionInitInput &input;
-	//! The columns that are being scanned
-	vector<StorageIndex> column_ids;
-};
-
 //===--------------------------------------------------------------------===//
 // Row group scan adapter
 //===--------------------------------------------------------------------===//
-//! Describes the scan that a row group scan source is created for. Adapters read what they need from the scan's bind
-//! data and init input (e.g. the pushed-down filters and scan order), and transaction_local tells them whether they are
-//! wrapping the persistent or the transaction-local storage of the table
-struct RowGroupScanSourceInfo {
-	RowGroupScanSourceInfo(ClientContext &context, const TableScanBindData &bind_data, TableFunctionInitInput &input,
-	                       bool transaction_local, vector<StorageIndex> column_ids)
-	    : context(context), bind_data(bind_data), input(input), transaction_local(transaction_local),
-	      column_ids(std::move(column_ids)) {
-	}
-
-	//! The context of the query that is scanning
-	ClientContext &context;
-	//! The bind data of the scan - read e.g. the table or the pushed-down scan order from it
-	const TableScanBindData &bind_data;
-	//! The init input of the scan - holds the pushed-down filters, sample options and projection
-	TableFunctionInitInput &input;
-	//! Whether this source feeds the transaction-local storage of the table (the uncommitted, in-memory row groups)
-	//! rather than its persistent storage. An adapter that only cares about persistent data can return `child`
-	//! unchanged here to avoid wrapping the handful of transaction-local row groups
-	bool transaction_local;
-	//! The columns that are being scanned
-	vector<StorageIndex> column_ids;
-};
-
 //! An adapter allows an extension to sit between the threads of a table scan and the row groups that the scan reads.
 //! Adapters are attached to a LogicalGet by an optimizer extension (see LogicalGet::AddRowGroupScanAdapter), which
 //! runs after all built-in optimizers, so the full optimized plan is available when deciding whether to hook a scan.
+//! An adapter captures what it needs about the query (table, filters, columns) when it is constructed.
 //!
 //! Wrap is called once per row group source of the scan: once for the persistent storage of the table, and once for
-//! its transaction-local storage. The two are distinguished by RowGroupScanSourceInfo::transaction_local.
+//! its transaction-local storage. The two are distinguished by the transaction_local flag.
 class RowGroupScanAdapter {
 public:
 	DUCKDB_API virtual ~RowGroupScanAdapter();
@@ -177,10 +130,11 @@ public:
 public:
 	//! The name of this adapter, used in error messages
 	virtual string Name() const = 0;
-	//! Wrap the source that the scan pulls its row groups from. `child` is the source that DuckDB would otherwise
-	//! have used - either the storage-order source, or the source implementing the pushed-down row group order.
-	//! Return `child` unchanged to stay out of this scan
-	virtual unique_ptr<RowGroupScanSource> Wrap(const RowGroupScanSourceInfo &info,
+	//! Wrap the source that the scan pulls its row groups from. `child` is the source that DuckDB would otherwise have
+	//! used - either the storage-order source, or the source implementing the pushed-down row group order.
+	//! transaction_local is true when wrapping the table's transaction-local storage. Return `child` unchanged to stay
+	//! out of this scan
+	virtual unique_ptr<RowGroupScanSource> Wrap(ClientContext &context, bool transaction_local,
 	                                            unique_ptr<RowGroupScanSource> child) = 0;
 };
 

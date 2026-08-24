@@ -21,6 +21,7 @@
 #include "duckdb/storage/table_storage_info.hpp"
 #include "duckdb/main/settings.hpp"
 #include "duckdb/execution/index/art/art.hpp"
+#include "duckdb/transaction/duck_transaction.hpp"
 #include "duckdb/transaction/duck_transaction_manager.hpp"
 #include "duckdb/common/type_visitor.hpp"
 
@@ -236,20 +237,21 @@ namespace {
 //! Build the source that hands out the row groups of a parallel scan: the pushed-down order (or storage order),
 //! wrapped by the adapters that extensions attached. Called once per collection (persistent + transaction-local), so
 //! the source is fully constructed here - it already has the collection's row groups
-unique_ptr<RowGroupScanSource> BuildRowGroupScanSource(const shared_ptr<RowGroupSegmentTree> &row_groups,
-                                                       optional_ptr<const RowGroupScanSourceSetup> setup,
+unique_ptr<RowGroupScanSource> BuildRowGroupScanSource(ClientContext &context, RowGroupCollection &collection,
+                                                       optional_ptr<const RowGroupOrderOptions> order_options,
+                                                       const vector<shared_ptr<RowGroupScanAdapter>> &adapters,
                                                        bool transaction_local) {
-	unique_ptr<RowGroupScanSource> source =
-	    setup && setup->order_options
-	        ? RowGroupScanSources::Reordered(*setup->order_options, setup->transaction, row_groups)
-	        : RowGroupScanSources::Storage(row_groups);
-	if (!setup) {
-		return source;
+	auto row_groups = collection.GetRowGroups();
+	unique_ptr<RowGroupScanSource> source;
+	if (order_options) {
+		auto transaction = TransactionData(DuckTransaction::Get(context, collection.GetAttached()));
+		source = RowGroupScanSources::Reordered(*order_options, transaction, std::move(row_groups));
+	} else {
+		source = RowGroupScanSources::Storage(std::move(row_groups));
 	}
 	// let each adapter wrap the source, so extensions can reorder / filter / replace / block the row groups
-	RowGroupScanSourceInfo info(setup->context, setup->bind_data, setup->input, transaction_local, setup->column_ids);
-	for (auto &adapter : setup->adapters) {
-		source = adapter->Wrap(info, std::move(source));
+	for (auto &adapter : adapters) {
+		source = adapter->Wrap(context, transaction_local, std::move(source));
 		if (!source) {
 			throw InternalException("RowGroupScanAdapter \"%s\" did not return a row group scan source",
 			                        adapter->Name());
@@ -308,16 +310,17 @@ bool RowGroupCollection::InitializeScanInRowGroup(ClientContext &context, Collec
 	return row_group.GetNode().InitializeScanWithOffset(state, row_group, vector_index);
 }
 
-void RowGroupCollection::InitializeParallelScan(ParallelCollectionScanState &state,
-                                                optional_ptr<const RowGroupScanSourceSetup> setup,
+void RowGroupCollection::InitializeParallelScan(ClientContext &context, ParallelCollectionScanState &state,
+                                                optional_ptr<const RowGroupOrderOptions> order_options,
+                                                const vector<shared_ptr<RowGroupScanAdapter>> &adapters,
                                                 bool transaction_local) {
 	state.collection = this;
 	state.row_groups = GetRowGroups();
 	// build the source that hands out the row groups: storage order (or the pushed-down order), wrapped by the
-	// adapters from setup. setup is null for callers that just want a storage-order scan - e.g. out-of-tree extensions
-	// (the spatial rtree index scan) that call DataTable::InitializeParallelScan directly. We do not pull the first row
-	// group here: the source might block, and we cannot suspend during init - NextParallelScan pulls it
-	state.row_group_source = BuildRowGroupScanSource(state.row_groups, setup, transaction_local);
+	// adapters. No order and no adapters (e.g. an out-of-tree scan calling DataTable::InitializeParallelScan directly)
+	// gives a plain storage-order source. We do not pull the first row group here: the source might block, and we
+	// cannot suspend during init - NextParallelScan pulls it
+	state.row_group_source = BuildRowGroupScanSource(context, *this, order_options, adapters, transaction_local);
 	state.current_row_group = nullptr;
 	state.vector_index = 0;
 	state.max_row = state.row_groups->GetBaseRowId() + total_rows;
