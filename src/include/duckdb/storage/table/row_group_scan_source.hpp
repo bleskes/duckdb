@@ -124,7 +124,7 @@ struct RowGroupScanInfo {
 	//! The filters the scan will apply - the final set, including filters pushed in dynamically at execution time
 	optional_ptr<TableFilterSet> filters;
 	//! The columns being scanned
-	const vector<StorageIndex> *column_ids = nullptr;
+	optional_ptr<const vector<StorageIndex>> column_ids;
 };
 
 //! An adapter allows an extension to sit between the threads of a table scan and the row groups that the scan reads.
