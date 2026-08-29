@@ -20,7 +20,10 @@ enum class TestSourceMode {
 	//! Only hand out the first row group of the child
 	FIRST_ONLY,
 	//! Block the scan once before handing out the row groups of the child
-	BLOCK_ONCE
+	BLOCK_ONCE,
+	//! Forward the child's row groups unchanged, one at a time, without draining first (a transparent wrapper). Keeps
+	//! the child's order and its early stop - used to check that a pushed-down row group order survives the wrap
+	PASSTHROUGH
 };
 
 struct TestSourceStats {
@@ -36,6 +39,12 @@ class TestRowGroupScanSource : public RowGroupScanSource {
 public:
 	TestRowGroupScanSource(unique_ptr<RowGroupScanSource> child_p, TestSourceMode mode, TestSourceStats &stats)
 	    : child(std::move(child_p)), mode(mode), stats(stats) {
+		stats.initialized++;
+		if (mode == TestSourceMode::PASSTHROUGH) {
+			// keep the child and forward its row groups lazily - do not drain, so its order and early stop are
+			// preserved
+			return;
+		}
 		// drain the child up front - this is what a source that sorts or filters row groups does. The child is already
 		// fully constructed (it has the collection's row groups), and the built-in child sources never block, so we
 		// pull them out directly with no context and no interrupt state
@@ -52,11 +61,18 @@ public:
 		} else if (mode == TestSourceMode::FIRST_ONLY && row_groups.size() > 1) {
 			row_groups.erase(row_groups.begin() + 1, row_groups.end());
 		}
-		stats.initialized++;
 	}
 
 public:
 	RowGroupScanResult Next(RowGroupScanSourceInput &input) override {
+		if (mode == TestSourceMode::PASSTHROUGH) {
+			// forward the child's row groups unchanged, so a pushed-down order (and its early stop) is preserved
+			auto result = child->Next(input);
+			if (result.type == AsyncResultType::HAVE_MORE_OUTPUT) {
+				stats.row_groups_handed_out++;
+			}
+			return result;
+		}
 		if (mode == TestSourceMode::BLOCK_ONCE && TryBlockOnce(input)) {
 			return RowGroupScanResult::Blocked();
 		}
@@ -248,4 +264,28 @@ TEST_CASE("Test row group scan source - blocking and resuming the scan", "[api]"
 	result = conn.Query("SELECT count(*) FROM integers");
 	REQUIRE_NO_FAIL(*result);
 	REQUIRE(result->GetValue(0, 0) == Value::BIGINT(NumericCast<int64_t>(row_count)));
+}
+
+TEST_CASE("Test row group scan source - pushed-down order survives an adapter", "[api]") {
+	TestSourceStats stats;
+	idx_t row_count;
+	// single thread so the number of row groups handed out is deterministic. i is ascending across the row groups
+	auto db = MakeDatabase(TestSourceMode::PASSTHROUGH, stats, row_count, 1);
+	Connection conn(*db);
+
+	// ORDER BY i LIMIT k pushes a row group order into the scan (a Reordered source). The passthrough adapter wraps
+	// that source and forwards it unchanged, so both the order and the early stop must survive the wrap
+	const idx_t k = 5;
+	auto result = conn.Query("SELECT i FROM integers ORDER BY i LIMIT " + to_string(k));
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(result->RowCount() == k);
+	// the smallest k values, in order - the pushed-down order came through the adapter correctly
+	for (idx_t r = 0; r < k; r++) {
+		REQUIRE(result->GetValue(0, r) == Value::BIGINT(NumericCast<int64_t>(r)));
+	}
+	// the adapter wrapped the reordered source ...
+	REQUIRE(stats.created_persistent == 1);
+	// ... and the reorder + limit still pruned to just the first row group (all k smallest values live there), instead
+	// of scanning everything - the pruning survived the wrap
+	REQUIRE(stats.row_groups_handed_out == 1);
 }
