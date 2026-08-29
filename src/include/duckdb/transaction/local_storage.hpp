@@ -19,6 +19,8 @@ namespace duckdb {
 class AttachedDatabase;
 class Catalog;
 class DataTable;
+struct RowGroupOrderOptions;
+class RowGroupScanAdapter;
 class StorageCommitState;
 class Transaction;
 class WriteAheadLog;
@@ -132,9 +134,13 @@ public:
 	//! Scan
 	void Scan(CollectionScanState &state, const vector<StorageIndex> &column_ids, DataChunk &result);
 
-	void InitializeParallelScan(DataTable &table, ParallelCollectionScanState &state);
-	bool NextParallelScan(ClientContext &context, DataTable &table, ParallelCollectionScanState &state,
-	                      CollectionScanState &scan_state);
+	void InitializeParallelScan(ClientContext &context, DataTable &table, ParallelCollectionScanState &state,
+	                            optional_ptr<const RowGroupOrderOptions> order_options = nullptr,
+	                            const vector<shared_ptr<RowGroupScanAdapter>> &adapters = {},
+	                            const RowGroupScanInfo &scan_info = {false, {}, {}});
+	AsyncResultType NextParallelScan(ClientContext &context, DataTable &table, ParallelCollectionScanState &state,
+	                                 CollectionScanState &scan_state,
+	                                 optional_ptr<const InterruptState> interrupt_state);
 
 	//! Begin appending to the local storage
 	void InitializeAppend(LocalAppendState &state, DataTable &table);

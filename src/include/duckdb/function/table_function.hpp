@@ -16,6 +16,7 @@
 #include "duckdb/planner/logical_operator.hpp"
 #include "duckdb/storage/statistics/node_statistics.hpp"
 #include "duckdb/storage/table/row_group_reorderer.hpp"
+#include "duckdb/storage/table/row_group_scan_source.hpp"
 #include "duckdb/common/column_index.hpp"
 #include "duckdb/common/enums/metric_type.hpp"
 #include "duckdb/common/table_column.hpp"
@@ -27,6 +28,7 @@
 namespace duckdb {
 
 class BaseStatistics;
+class InterruptState;
 class LogicalDependencyList;
 class LogicalGet;
 class TableFunction;
@@ -173,6 +175,9 @@ public:
 	optional_ptr<GlobalTableFunctionState> global_state;
 	AsyncResult async_result {};
 	AsyncResultsExecutionMode results_execution_mode {AsyncResultsExecutionMode::SYNCHRONOUS};
+	//! Interrupt state of the calling task, so the function can park and be woken up by returning a taskless BLOCKED
+	//! result
+	optional_ptr<const InterruptState> interrupt_state;
 };
 
 struct TableFunctionPartitionInput {
@@ -356,6 +361,9 @@ typedef vector<column_t> (*table_function_get_row_id_columns)(ClientContext &con
 typedef void (*table_function_set_scan_order)(unique_ptr<RowGroupOrderOptions> order_options,
                                               optional_ptr<FunctionData> bind_data);
 
+typedef void (*table_function_add_row_group_scan_adapter)(shared_ptr<RowGroupScanAdapter> adapter,
+                                                          optional_ptr<FunctionData> bind_data);
+
 //! When to call init_global to initialize the table function
 enum class TableFunctionInitialization { INITIALIZE_ON_EXECUTE, INITIALIZE_ON_SCHEDULE };
 
@@ -478,6 +486,8 @@ public:
 	table_function_get_row_id_columns get_row_id_columns;
 	//! (Optional) sets the order to scan the row groups in
 	table_function_set_scan_order set_scan_order;
+	//! (Optional) adds an adapter that sits between the threads of the scan and the row groups that they read
+	table_function_add_row_group_scan_adapter add_row_group_scan_adapter;
 
 	table_function_serialize_t serialize;
 	table_function_deserialize_t deserialize;

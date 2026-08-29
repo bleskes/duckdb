@@ -52,7 +52,8 @@ public:
 
 	static AsyncResultType GetAsyncResultType(SourceResultType s);
 
-	// Check whether there are tasks associated
+	// Check whether there are tasks associated. A BLOCKED result without tasks is a "parked" function: it is resumed
+	// by an InterruptState callback rather than by scheduling tasks (backported from main)
 	bool HasTasks() const;
 	AsyncResultType GetResultType() const;
 	// Extract associated tasks, moving them away, will empty async_tasks and trasnform to INVALID

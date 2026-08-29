@@ -132,21 +132,18 @@ AsyncResultType AsyncResult::GetAsyncResultType(SourceResultType s) {
 
 bool AsyncResult::HasTasks() const {
 	D_ASSERT(result_type != AsyncResultType::INVALID);
-	if (async_tasks.empty()) {
-		D_ASSERT(result_type != AsyncResultType::BLOCKED);
-		return false;
-	} else {
+	// note: a BLOCKED result may legitimately have no tasks - it is then a "parked" function that is resumed via an
+	// InterruptState callback rather than by scheduling tasks (backported from main)
+	if (!async_tasks.empty()) {
 		D_ASSERT(result_type == AsyncResultType::BLOCKED);
 		return true;
 	}
+	return false;
 }
+
 AsyncResultType AsyncResult::GetResultType() const {
 	D_ASSERT(result_type != AsyncResultType::INVALID);
-	if (async_tasks.empty()) {
-		D_ASSERT(result_type != AsyncResultType::BLOCKED);
-	} else {
-		D_ASSERT(result_type == AsyncResultType::BLOCKED);
-	}
+	D_ASSERT(async_tasks.empty() || result_type == AsyncResultType::BLOCKED);
 	return result_type;
 }
 vector<unique_ptr<AsyncTask>> &&AsyncResult::ExtractAsyncTasks() {

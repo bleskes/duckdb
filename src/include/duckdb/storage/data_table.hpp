@@ -47,6 +47,8 @@ struct ColumnFetchState;
 struct DataTableInfo;
 struct LocalAppendState;
 struct ParallelTableScanState;
+struct RowGroupOrderOptions;
+class RowGroupScanAdapter;
 struct TableAppendState;
 class CommitDropState;
 
@@ -92,7 +94,19 @@ public:
 	//! Returns the maximum amount of threads that should be assigned to scan this data table
 	idx_t MaxThreads(ClientContext &context) const;
 	void InitializeParallelScan(ClientContext &context, ParallelTableScanState &state,
-	                            const vector<ColumnIndex> &column_indexes);
+	                            const vector<ColumnIndex> &column_indexes,
+	                            optional_ptr<const RowGroupOrderOptions> order_options = nullptr,
+	                            const vector<shared_ptr<RowGroupScanAdapter>> &adapters = {},
+	                            const optional_ptr<TableFilterSet> filters = {},
+	                            const vector<StorageIndex> &column_ids = {});
+	//! Assign the next row group to scan to the given scan state. On HAVE_MORE_OUTPUT the row group is set on the scan
+	//! state; on BLOCKED the row group source parked the scan and the caller must suspend it (the source resumes it via
+	//! the interrupt_state it was handed)
+	AsyncResultType NextParallelScan(ClientContext &context, ParallelTableScanState &state, TableScanState &scan_state,
+	                                 optional_ptr<const InterruptState> interrupt_state);
+	//! Backwards-compatible overload for out-of-tree extensions that call the pre-existing 3-argument signature (e.g.
+	//! the spatial extension's rtree index scan, rtree_index_scan.cpp). Returns the number of rows in the assigned row
+	//! group (0 when the scan is finished); the scan cannot be parked on this path
 	idx_t NextParallelScan(ClientContext &context, ParallelTableScanState &state, TableScanState &scan_state);
 
 	//! Scans up to STANDARD_VECTOR_SIZE elements from the table starting

@@ -15,11 +15,15 @@
 #include "duckdb/storage/storage_index.hpp"
 #include "duckdb/common/enums/index_removal_type.hpp"
 #include "duckdb/common/enums/row_group_append_mode.hpp"
+#include "duckdb/storage/table/row_group_scan_source.hpp"
 
 namespace duckdb {
 
 struct ParallelTableScanState;
 struct ParallelCollectionScanState;
+struct RowGroupOrderOptions;
+class RowGroupScanAdapter;
+class InterruptState;
 class CreateIndexScanState;
 class CollectionScanState;
 class PersistentTableData;
@@ -78,8 +82,18 @@ public:
 	static bool InitializeScanInRowGroup(ClientContext &context, CollectionScanState &state,
 	                                     RowGroupCollection &collection, SegmentNode<RowGroup> &row_group,
 	                                     idx_t vector_index, idx_t max_row);
-	void InitializeParallelScan(ParallelCollectionScanState &state);
-	bool NextParallelScan(ClientContext &context, ParallelCollectionScanState &state, CollectionScanState &scan_state);
+	//! Build the row group source of this collection's parallel scan: storage order (or the pushed-down order_options),
+	//! wrapped by the given adapters. transaction_local tells the adapters whether this is the transaction-local
+	//! storage
+	void InitializeParallelScan(ClientContext &context, ParallelCollectionScanState &state,
+	                            optional_ptr<const RowGroupOrderOptions> order_options = nullptr,
+	                            const vector<shared_ptr<RowGroupScanAdapter>> &adapters = {},
+	                            const RowGroupScanInfo &scan_info = {false, {}, {}});
+	//! Assign the next row group to the given scan state. On HAVE_MORE_OUTPUT the assigned row group is set on the scan
+	//! state; returns BLOCKED if the row group source parked the scan, FINISHED when there is nothing left to scan
+	AsyncResultType NextParallelScan(ClientContext &context, ParallelCollectionScanState &state,
+	                                 CollectionScanState &scan_state,
+	                                 optional_ptr<const InterruptState> interrupt_state);
 
 	RowGroupIterationHelper Chunks(DuckTransaction &transaction);
 	RowGroupIterationHelper Chunks(DuckTransaction &transaction, const vector<StorageIndex> &column_ids);

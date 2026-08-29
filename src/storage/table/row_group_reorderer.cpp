@@ -203,16 +203,20 @@ OffsetPruningResult FindOffsetPrunableChunks(It it, End end, const OrderByStatis
 
 } // namespace
 
-RowGroupReorderer::RowGroupReorderer(const RowGroupOrderOptions &options_p, TransactionData transaction_p)
-    : options(options_p), transaction(transaction_p), offset(0), initialized(false) {
+RowGroupReorderer::RowGroupReorderer(const RowGroupOrderOptions &options_p, TransactionData transaction_p,
+                                     shared_ptr<RowGroupSegmentTree> row_groups_p)
+    : options(options_p), transaction(transaction_p), row_groups(std::move(row_groups_p)), next_index(0) {
+	D_ASSERT(row_groups);
+	ComputeOrder(*row_groups);
 }
 
-optional_ptr<SegmentNode<RowGroup>> RowGroupReorderer::GetNextRowGroup(SegmentNode<RowGroup> &row_group) {
-	D_ASSERT(RefersToSameObject(ordered_row_groups[offset].get(), row_group));
-	if (offset >= ordered_row_groups.size() - 1) {
-		return nullptr;
+RowGroupScanResult RowGroupReorderer::Next(RowGroupScanSourceInput &input) {
+	D_ASSERT(row_groups);
+	const auto index = next_index++;
+	if (index >= ordered_row_groups.size()) {
+		return RowGroupScanResult::Finished();
 	}
-	return ordered_row_groups[++offset].get();
+	return RowGroupScanResult::WithRowGroup(ordered_row_groups[index].get());
 }
 
 Value RowGroupReorderer::RetrieveStat(const BaseStatistics &stats, OrderByStatistics order_by,
@@ -320,16 +324,7 @@ OffsetPruningResult RowGroupReorderer::GetOffsetAfterPruning(const OrderByStatis
 	}
 }
 
-optional_ptr<SegmentNode<RowGroup>> RowGroupReorderer::GetRootSegment(RowGroupSegmentTree &row_groups) {
-	if (initialized) {
-		if (ordered_row_groups.empty()) {
-			return nullptr;
-		}
-		return ordered_row_groups[0].get();
-	}
-
-	initialized = true;
-
+void RowGroupReorderer::ComputeOrder(RowGroupSegmentTree &row_groups) {
 	vector<reference<SegmentNode<RowGroup>>> null_only_groups;
 	vector<reference<SegmentNode<RowGroup>>> ambiguous_groups;
 	multimap<Value, RowGroupSegmentNodeEntry> row_group_map;
@@ -365,12 +360,6 @@ optional_ptr<SegmentNode<RowGroup>> RowGroupReorderer::GetRootSegment(RowGroupSe
 		AppendRowGroups(ambiguous_groups, 0, ordered_row_groups);
 		AppendRowGroups(null_only_groups, 0, ordered_row_groups);
 	}
-
-	if (ordered_row_groups.empty()) {
-		return nullptr;
-	}
-
-	return ordered_row_groups[0].get();
 }
 
 } // namespace duckdb

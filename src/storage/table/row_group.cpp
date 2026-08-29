@@ -314,6 +314,7 @@ void ColumnScanState::Initialize(const QueryContext &context_p, const LogicalTyp
 }
 
 void CollectionScanState::Initialize(const QueryContext &context, const vector<LogicalType> &types) {
+	this->context = context.GetClientContext();
 	auto &column_ids = GetColumnIds();
 	D_ASSERT(column_scans.empty());
 	column_scans.reserve(column_ids.size());

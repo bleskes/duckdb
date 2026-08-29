@@ -377,14 +377,19 @@ void LocalStorage::Scan(CollectionScanState &state, const vector<StorageIndex> &
 	state.Scan(transaction, result);
 }
 
-void LocalStorage::InitializeParallelScan(DataTable &table, ParallelCollectionScanState &state) {
+void LocalStorage::InitializeParallelScan(ClientContext &context, DataTable &table, ParallelCollectionScanState &state,
+                                          optional_ptr<const RowGroupOrderOptions> order_options,
+                                          const vector<shared_ptr<RowGroupScanAdapter>> &adapters,
+                                          const RowGroupScanInfo &scan_info) {
 	auto storage = table_manager.GetStorage(table);
 	if (!storage) {
 		state.max_row = 0;
-		state.vector_index = 0;
 		state.current_row_group = nullptr;
+		state.vector_index = 0;
+		// there is no transaction-local storage to scan - leave the source unset so NextParallelScan hands out nothing
+		state.row_group_source.reset();
 	} else {
-		storage->GetCollection().InitializeParallelScan(state);
+		storage->GetCollection().InitializeParallelScan(context, state, order_options, adapters, scan_info);
 	}
 }
 
@@ -396,13 +401,14 @@ OptimisticWriteCollection &LocalTableStorage::GetPrimaryCollection() {
 	return *row_groups;
 }
 
-bool LocalStorage::NextParallelScan(ClientContext &context, DataTable &table, ParallelCollectionScanState &state,
-                                    CollectionScanState &scan_state) {
+AsyncResultType LocalStorage::NextParallelScan(ClientContext &context, DataTable &table,
+                                               ParallelCollectionScanState &state, CollectionScanState &scan_state,
+                                               optional_ptr<const InterruptState> interrupt_state) {
 	auto storage = table_manager.GetStorage(table);
 	if (!storage) {
-		return false;
+		return AsyncResultType::FINISHED;
 	}
-	return storage->GetCollection().NextParallelScan(context, state, scan_state);
+	return storage->GetCollection().NextParallelScan(context, state, scan_state, interrupt_state);
 }
 
 void LocalStorage::InitializeAppend(LocalAppendState &state, DataTable &table) {
