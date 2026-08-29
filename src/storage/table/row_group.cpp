@@ -317,7 +317,7 @@ void CollectionScanState::Initialize(const QueryContext &context, const vector<L
 	this->context = context.GetClientContext();
 	auto &column_ids = GetColumnIds();
 	D_ASSERT(column_scans.empty());
-	column_scans.reserve(column_scans.size());
+	column_scans.reserve(column_ids.size());
 	for (idx_t i = 0; i < column_ids.size(); i++) {
 		column_scans.emplace_back(*this);
 	}
