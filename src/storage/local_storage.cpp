@@ -389,8 +389,7 @@ void LocalStorage::InitializeParallelScan(ClientContext &context, DataTable &tab
 		// there is no transaction-local storage to scan - leave the source unset so NextParallelScan hands out nothing
 		state.row_group_source.reset();
 	} else {
-		storage->GetCollection().InitializeParallelScan(context, state, order_options, adapters, scan_info,
-		                                                /* transaction_local */ true);
+		storage->GetCollection().InitializeParallelScan(context, state, order_options, adapters, scan_info);
 	}
 }
 

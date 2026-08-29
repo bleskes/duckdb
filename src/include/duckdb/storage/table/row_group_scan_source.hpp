@@ -119,12 +119,16 @@ struct RowGroupScanSources {
 //===--------------------------------------------------------------------===//
 //! What a scan tells its row group scan adapters about itself
 struct RowGroupScanInfo {
+	RowGroupScanInfo(bool transaction_local, const optional_ptr<TableFilterSet> &filters,
+	                 const vector<StorageIndex> &column_ids)
+	    : transaction_local(transaction_local), filters(filters), column_ids(column_ids) {
+	}
 	//! True when wrapping the table's transaction-local storage rather than its persistent storage
-	bool transaction_local = false;
+	const bool transaction_local = false;
 	//! The filters the scan will apply - the final set, including filters pushed in dynamically at execution time
-	optional_ptr<TableFilterSet> filters;
+	const optional_ptr<TableFilterSet> filters;
 	//! The columns being scanned
-	optional_ptr<const vector<StorageIndex>> column_ids;
+	const vector<StorageIndex> &column_ids;
 };
 
 //! An adapter allows an extension to sit between the threads of a table scan and the row groups that the scan reads.

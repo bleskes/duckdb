@@ -137,7 +137,7 @@ public:
 	void InitializeParallelScan(ClientContext &context, DataTable &table, ParallelCollectionScanState &state,
 	                            optional_ptr<const RowGroupOrderOptions> order_options = nullptr,
 	                            const vector<shared_ptr<RowGroupScanAdapter>> &adapters = {},
-	                            const RowGroupScanInfo &scan_info = {});
+	                            const RowGroupScanInfo &scan_info = {false, {}, {}});
 	AsyncResultType NextParallelScan(ClientContext &context, DataTable &table, ParallelCollectionScanState &state,
 	                                 CollectionScanState &scan_state,
 	                                 optional_ptr<const InterruptState> interrupt_state);

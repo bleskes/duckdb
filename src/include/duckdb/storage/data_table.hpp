@@ -97,7 +97,8 @@ public:
 	                            const vector<ColumnIndex> &column_indexes,
 	                            optional_ptr<const RowGroupOrderOptions> order_options = nullptr,
 	                            const vector<shared_ptr<RowGroupScanAdapter>> &adapters = {},
-	                            const RowGroupScanInfo &scan_info = {});
+	                            const optional_ptr<TableFilterSet> filters = {},
+	                            const vector<StorageIndex> &column_ids = {});
 	//! Assign the next row group to scan to the given scan state. On HAVE_MORE_OUTPUT the row group is set on the scan
 	//! state; on BLOCKED the row group source parked the scan and the caller must suspend it (the source resumes it via
 	//! the interrupt_state it was handed)

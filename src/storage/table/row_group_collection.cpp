@@ -240,7 +240,7 @@ namespace {
 unique_ptr<RowGroupScanSource> BuildRowGroupScanSource(ClientContext &context, RowGroupCollection &collection,
                                                        optional_ptr<const RowGroupOrderOptions> order_options,
                                                        const vector<shared_ptr<RowGroupScanAdapter>> &adapters,
-                                                       const RowGroupScanInfo &scan_info, bool transaction_local) {
+                                                       const RowGroupScanInfo &scan_info) {
 	auto row_groups = collection.GetRowGroups();
 	unique_ptr<RowGroupScanSource> source;
 	if (order_options) {
@@ -253,10 +253,8 @@ unique_ptr<RowGroupScanSource> BuildRowGroupScanSource(ClientContext &context, R
 		return source;
 	}
 	// let each adapter wrap the source, so extensions can reorder / filter / replace / block the row groups
-	RowGroupScanInfo info = scan_info;
-	info.transaction_local = transaction_local;
 	for (auto &adapter : adapters) {
-		source = adapter->Wrap(context, info, std::move(source));
+		source = adapter->Wrap(context, scan_info, std::move(source));
 		if (!source) {
 			throw InternalException("RowGroupScanAdapter \"%s\" did not return a row group scan source",
 			                        adapter->Name());
@@ -318,15 +316,14 @@ bool RowGroupCollection::InitializeScanInRowGroup(ClientContext &context, Collec
 void RowGroupCollection::InitializeParallelScan(ClientContext &context, ParallelCollectionScanState &state,
                                                 optional_ptr<const RowGroupOrderOptions> order_options,
                                                 const vector<shared_ptr<RowGroupScanAdapter>> &adapters,
-                                                const RowGroupScanInfo &scan_info, bool transaction_local) {
+                                                const RowGroupScanInfo &scan_info) {
 	state.collection = this;
 	state.row_groups = GetRowGroups();
 	// build the source that hands out the row groups: storage order (or the pushed-down order), wrapped by the
 	// adapters. No order and no adapters (e.g. an out-of-tree scan calling DataTable::InitializeParallelScan directly)
 	// gives a plain storage-order source. We do not pull the first row group here: the source might block, and we
 	// cannot suspend during init - NextParallelScan pulls it
-	state.row_group_source =
-	    BuildRowGroupScanSource(context, *this, order_options, adapters, scan_info, transaction_local);
+	state.row_group_source = BuildRowGroupScanSource(context, *this, order_options, adapters, scan_info);
 	state.current_row_group = nullptr;
 	state.vector_index = 0;
 	state.max_row = state.row_groups->GetBaseRowId() + total_rows;

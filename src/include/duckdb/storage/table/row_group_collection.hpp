@@ -88,7 +88,7 @@ public:
 	void InitializeParallelScan(ClientContext &context, ParallelCollectionScanState &state,
 	                            optional_ptr<const RowGroupOrderOptions> order_options = nullptr,
 	                            const vector<shared_ptr<RowGroupScanAdapter>> &adapters = {},
-	                            const RowGroupScanInfo &scan_info = {}, bool transaction_local = false);
+	                            const RowGroupScanInfo &scan_info = {false, {}, {}});
 	//! Assign the next row group to the given scan state. On HAVE_MORE_OUTPUT the assigned row group is set on the scan
 	//! state; returns BLOCKED if the row group source parked the scan, FINISHED when there is nothing left to scan
 	AsyncResultType NextParallelScan(ClientContext &context, ParallelCollectionScanState &state,
