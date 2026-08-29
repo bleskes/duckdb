@@ -35,6 +35,9 @@ struct TableScanBindData : public TableFunctionData {
 	unique_ptr<RowGroupOrderOptions> order_options;
 	//! Subset of partition indices to scan, if null, scan all
 	unique_ptr<unordered_set<idx_t>> partitions_to_scan;
+	//! Adapters that wrap the row group sources of this scan, in the order in which they were added.
+	//! Attached by optimizer extensions through LogicalGet::AddRowGroupScanAdapter
+	vector<shared_ptr<RowGroupScanAdapter>> row_group_scan_adapters;
 
 public:
 	bool Equals(const FunctionData &other_p) const override {
@@ -49,6 +52,7 @@ public:
 		bind_data->order_options = order_options ? make_uniq<RowGroupOrderOptions>(*order_options) : nullptr;
 		bind_data->partitions_to_scan =
 		    partitions_to_scan ? make_uniq<unordered_set<idx_t>>(*partitions_to_scan) : nullptr;
+		bind_data->row_group_scan_adapters = row_group_scan_adapters;
 		return std::move(bind_data);
 	}
 };

@@ -49,6 +49,7 @@ set(TEST_API_OBJECTS
     test_windows_unicode_path.cpp
     test_object_cache.cpp
     test_partial_executor.cpp
+    test_row_group_scan_source.cpp
     test_buffer_pool_eviction.cpp
     test_block_allocator_tls.cpp)
 

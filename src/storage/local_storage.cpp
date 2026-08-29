@@ -386,6 +386,9 @@ void LocalStorage::InitializeParallelScan(DataTable &table, ParallelCollectionSc
 		state.max_row = 0;
 		state.vector_index = 0;
 		state.current_row_group = nullptr;
+		// there is no transaction-local storage to scan - drop the (uninitialized) source so NextParallelScan's guard
+		// returns FINISHED instead of pulling from it, even if local storage appears later in the query
+		state.row_group_source.reset();
 	} else {
 		storage->GetCollection().InitializeParallelScan(state);
 	}
@@ -399,13 +402,14 @@ OptimisticWriteCollection &LocalTableStorage::GetPrimaryCollection() {
 	return *row_groups;
 }
 
-bool LocalStorage::NextParallelScan(ClientContext &context, DataTable &table, ParallelCollectionScanState &state,
-                                    CollectionScanState &scan_state) {
+AsyncResultType LocalStorage::NextParallelScan(ClientContext &context, DataTable &table,
+                                               ParallelCollectionScanState &state, CollectionScanState &scan_state,
+                                               optional_ptr<const InterruptState> interrupt_state) {
 	auto storage = table_manager.GetStorage(table);
 	if (!storage) {
-		return false;
+		return AsyncResultType::FINISHED;
 	}
-	return storage->GetCollection().NextParallelScan(context, state, scan_state);
+	return storage->GetCollection().NextParallelScan(context, state, scan_state, interrupt_state);
 }
 
 void LocalStorage::InitializeAppend(LocalAppendState &state, DataTable &table, DuckTableEntry &table_entry) {

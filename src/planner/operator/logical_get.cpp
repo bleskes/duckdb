@@ -304,6 +304,18 @@ void LogicalGet::SetPartitionsToScan(vector<idx_t> partition_indices) {
 	function.set_partitions_to_scan(std::move(partition_indices), bind_data.get());
 }
 
+void LogicalGet::AddRowGroupScanAdapter(shared_ptr<RowGroupScanAdapter> adapter) {
+	D_ASSERT(adapter);
+	if (!function.add_row_group_scan_adapter) {
+		throw InvalidInputException(
+		    "Cannot add a row group scan adapter to a scan of table function \"%s\": the function does not scan row "
+		    "groups",
+		    function.name);
+	}
+	function.add_row_group_scan_adapter(std::move(adapter), bind_data.get());
+	has_row_group_scan_adapter = true;
+}
+
 void LogicalGet::Serialize(Serializer &serializer) const {
 	LogicalOperator::Serialize(serializer);
 	serializer.WriteProperty(200, "table_index", table_index);

@@ -11,6 +11,7 @@
 #include "duckdb/function/partition_stats.hpp"
 #include "duckdb/storage/table/row_group.hpp"
 #include "duckdb/storage/table/row_group_order_options.hpp"
+#include "duckdb/storage/table/row_group_scan_source.hpp"
 #include "duckdb/storage/table/row_group_segment_tree.hpp"
 #include "duckdb/storage/table/segment_tree.hpp"
 
@@ -22,11 +23,15 @@ struct OffsetPruningResult {
 	idx_t leading_null_group_offset;
 };
 
-class RowGroupReorderer {
+//! Hands out the row groups of a collection in the order dictated by the given order options. The order is computed
+//! once during Initialize; handing out row groups afterwards is lock-free
+class RowGroupReorderer : public RowGroupScanSource {
 public:
 	RowGroupReorderer(const RowGroupOrderOptions &options_p, TransactionData transaction_p);
-	optional_ptr<SegmentNode<RowGroup>> GetRootSegment(RowGroupSegmentTree &row_groups);
-	optional_ptr<SegmentNode<RowGroup>> GetNextRowGroup(SegmentNode<RowGroup> &row_group);
+
+public:
+	void Initialize(RowGroupScanSourceInitInput &input) override;
+	RowGroupScanResult Next(RowGroupScanSourceInput &input) override;
 
 	static Value RetrieveStat(const BaseStatistics &stats, OrderByStatistics order_by, OrderByColumnType column_type);
 	static OffsetPruningResult GetOffsetAfterPruning(OrderByStatistics order_by, OrderByColumnType column_type,
@@ -35,12 +40,19 @@ public:
 	                                                 vector<PartitionStatistics> &stats);
 
 private:
+	//! Compute the order in which the row groups are handed out
+	void ComputeOrder(RowGroupSegmentTree &row_groups);
+
+private:
 	const RowGroupOrderOptions options;
 	const TransactionData transaction;
 
-	idx_t offset;
-	bool initialized;
+	//! The segment tree we hand out row groups of - kept alive for as long as we do
+	shared_ptr<RowGroupSegmentTree> row_groups;
+	//! The row groups in the order in which they are handed out - immutable after Initialize
 	vector<reference<SegmentNode<RowGroup>>> ordered_row_groups;
+	//! The index of the next row group to hand out (Next is called serialized, so this needs no synchronization)
+	idx_t next_index;
 };
 
 } // namespace duckdb

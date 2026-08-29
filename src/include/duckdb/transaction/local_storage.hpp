@@ -10,6 +10,7 @@
 
 #include "duckdb/storage/table/table_index_list.hpp"
 #include "duckdb/storage/optimistic_data_writer.hpp"
+#include "duckdb/common/enums/operator_result_type.hpp"
 #include "duckdb/common/error_data.hpp"
 #include "duckdb/common/reference_map.hpp"
 
@@ -22,6 +23,7 @@ class CollectionScanState;
 class ColumnDefinition;
 class DataChunk;
 class DataTable;
+class InterruptState;
 class DuckTableEntry;
 class DuckTransaction;
 class Expression;
@@ -158,8 +160,9 @@ public:
 	void Scan(CollectionScanState &state, const vector<StorageIndex> &column_ids, DataChunk &result);
 
 	void InitializeParallelScan(DataTable &table, ParallelCollectionScanState &state);
-	bool NextParallelScan(ClientContext &context, DataTable &table, ParallelCollectionScanState &state,
-	                      CollectionScanState &scan_state);
+	AsyncResultType NextParallelScan(ClientContext &context, DataTable &table, ParallelCollectionScanState &state,
+	                                 CollectionScanState &scan_state,
+	                                 optional_ptr<const InterruptState> interrupt_state);
 
 	//! Begin appending to the local storage
 	void InitializeAppend(LocalAppendState &state, DataTable &table, DuckTableEntry &table_entry);

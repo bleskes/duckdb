@@ -27,6 +27,7 @@ class ColumnSegment;
 class LocalTableStorage;
 class CollectionScanState;
 class Index;
+class InterruptState;
 class RowGroup;
 class RowGroupCollection;
 class UpdateSegment;
@@ -295,8 +296,8 @@ public:
 	//! The amount of tuples considered by a scan, before applying filters
 	idx_t rows_scanned = 0;
 
-	//! Optional state for custom row group ordering
-	unique_ptr<RowGroupReorderer> reorderer;
+	//! The source that hands out the row groups to scan
+	shared_ptr<RowGroupScanSource> row_group_source;
 
 public:
 	void Initialize(const QueryContext &context_p, const vector<LogicalType> &types);
@@ -304,9 +305,8 @@ public:
 	ScanFilterInfo &GetFilterInfo();
 	ScanSamplingInfo &GetSamplingInfo();
 	TableScanOptions &GetOptions();
-	optional_ptr<SegmentNode<RowGroup>> GetNextRowGroup(SegmentNode<RowGroup> &row_group) const;
+	optional_ptr<SegmentNode<RowGroup>> GetNextRowGroup();
 	optional_ptr<SegmentNode<RowGroup>> GetNextRowGroup(SegmentLock &l, SegmentNode<RowGroup> &row_group) const;
-	optional_ptr<SegmentNode<RowGroup>> GetRootSegment() const;
 	bool Scan(DuckTransaction &transaction, DataChunk &result);
 	bool Scan(DataChunk &result, TableScanType type, optional_ptr<SegmentLock> l = nullptr);
 	//! Prepares the next eligible vector of the assignment and collects its I/O tasks
@@ -381,10 +381,11 @@ private:
 
 struct ParallelCollectionScanState {
 	ParallelCollectionScanState();
-	void AssignRowGroup(optional_ptr<SegmentNode<RowGroup>> row_group);
-	optional_ptr<SegmentNode<RowGroup>> GetRootSegment(RowGroupSegmentTree &row_groups) const;
-	optional_ptr<SegmentNode<RowGroup>> GetNextRowGroup(RowGroupSegmentTree &row_groups,
-	                                                    SegmentNode<RowGroup> &row_group) const;
+	//! Pull the next row group out of the row group source. Called under the state lock, so the source is not pulled
+	//! concurrently. interrupt_state is the scanning task's interrupt state, so the source can park the scan (only set
+	//! when the scan can be suspended)
+	RowGroupScanResult NextRowGroup(optional_ptr<ClientContext> context,
+	                                optional_ptr<const InterruptState> interrupt_state) const;
 
 	//! The row group collection we are scanning
 	RowGroupCollection *collection;
@@ -397,8 +398,8 @@ struct ParallelCollectionScanState {
 	optional_idx row_number_base;
 	mutex lock;
 
-	//! Optional state for custom row group ordering
-	unique_ptr<RowGroupReorderer> reorderer;
+	//! The source that hands out the row groups to scan (replaces the row group reorderer)
+	shared_ptr<RowGroupScanSource> row_group_source;
 	//! Subset of partition indices to scan, if null, scan all
 	optional_ptr<const unordered_set<idx_t>> partitions_to_scan;
 

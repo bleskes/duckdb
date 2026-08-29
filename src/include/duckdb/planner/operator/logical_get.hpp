@@ -66,6 +66,9 @@ public:
 	unique_ptr<RowGroupOrderOptions> row_group_order_options;
 	//! Partition indices to scan, empty means scan all
 	vector<idx_t> scan_partition_indices;
+	//! Whether an extension attached a row group scan adapter to this scan. Adapters cannot be serialized, so a get
+	//! that has one is excluded from serialization verification (they are re-attached by the optimizer extension)
+	bool has_row_group_scan_adapter = false;
 
 	string GetName() const override;
 	InsertionOrderPreservingMap<string> ParamsToString() const override;
@@ -90,10 +93,17 @@ public:
 	bool TryGetStorageIndex(const ColumnIndex &column_index, StorageIndex &out_index) const;
 	void SetScanOrder(unique_ptr<RowGroupOrderOptions> options);
 	void SetPartitionsToScan(vector<idx_t> partition_indices);
+	//! Let an extension adapt the row group scanning logic of this scan. Throws if the table function does not scan
+	//! row groups
+	void AddRowGroupScanAdapter(shared_ptr<RowGroupScanAdapter> adapter);
 
 	vector<TableIndex> GetTableIndex() const override;
 	//! Skips the serialization check in VerifyPlan
 	bool SupportSerialization() const override {
+		if (has_row_group_scan_adapter) {
+			// row group scan adapters cannot be serialized; they are re-attached by the optimizer extension
+			return false;
+		}
 		if (!function.verify_serialization) {
 			return false;
 		}

@@ -306,16 +306,33 @@ void RowGroupCollection::Verify() {
 //===--------------------------------------------------------------------===//
 // Scan
 //===--------------------------------------------------------------------===//
+namespace {
+
+//! Initialize the source that hands out the row groups of this scan. Every scan installs its source before calling this
+//! (the table scan installs a storage/reordered/adapter-wrapped source, sequential and offset scans install a
+//! storage-order source), so here the source learns which collection it operates on and does its up-front work
+void InitializeRowGroupScanSource(RowGroupCollection &collection, RowGroupScanSource &source,
+                                  shared_ptr<RowGroupSegmentTree> row_groups) {
+	RowGroupScanSourceInitInput input(collection, std::move(row_groups));
+	source.Initialize(input);
+}
+
+} // namespace
+
 void RowGroupCollection::InitializeScan(const QueryContext &context, CollectionScanState &state,
                                         const vector<StorageIndex> &column_ids,
                                         optional_ptr<TableFilterSet> table_filters) {
 	state.row_groups = GetRowGroups();
-	auto row_group = state.GetRootSegment();
-	D_ASSERT(row_group);
 	state.max_row = state.row_groups->GetBaseRowId() + next_row_id.load();
 	state.Initialize(context, GetTypes());
+	// the table scan may install a reordered/adapter-wrapped source; otherwise hand out row groups in storage order
+	if (!state.row_group_source) {
+		state.row_group_source = RowGroupScanSources::Storage();
+	}
+	InitializeRowGroupScanSource(*this, *state.row_group_source, state.row_groups);
+	auto row_group = state.GetNextRowGroup();
 	while (row_group && !row_group->GetNode().InitializeScan(state, *row_group)) {
-		row_group = state.GetNextRowGroup(*row_group);
+		row_group = state.GetNextRowGroup();
 	}
 }
 
@@ -353,15 +370,29 @@ bool RowGroupCollection::InitializeScanInRowGroup(ClientContext &context, Collec
 void RowGroupCollection::InitializeParallelScan(ParallelCollectionScanState &state) {
 	state.collection = this;
 	state.row_groups = GetRowGroups();
-	state.AssignRowGroup(state.GetRootSegment(*state.row_groups));
+	// the table scan installs the source (storage/reordered/adapter-wrapped) before starting the parallel scan; callers
+	// that do not (e.g. out-of-tree scans) get a storage-order source. We do not pull the first row group here: the
+	// source might block, and we cannot suspend during init - NextParallelScan pulls it
+	if (!state.row_group_source) {
+		state.row_group_source = RowGroupScanSources::Storage();
+	}
+	InitializeRowGroupScanSource(*this, *state.row_group_source, state.row_groups);
+	state.current_row_group = nullptr;
 	state.vector_index = 0;
 	state.max_row = state.row_groups->GetBaseRowId() + next_row_id.load();
 	state.batch_index = 0;
 	state.processed_rows = 0;
 }
 
-bool RowGroupCollection::NextParallelScan(ClientContext &context, ParallelCollectionScanState &state,
-                                          CollectionScanState &scan_state) {
+AsyncResultType RowGroupCollection::NextParallelScan(ClientContext &context, ParallelCollectionScanState &state,
+                                                     CollectionScanState &scan_state,
+                                                     optional_ptr<const InterruptState> interrupt_state) {
+	if (!state.row_group_source) {
+		// the parallel state was never initialized for this collection (e.g. transaction-local storage that did not
+		// exist at scan setup). Nothing to hand out
+		scan_state.batch_index = state.batch_index;
+		return AsyncResultType::FINISHED;
+	}
 	AssignSharedPointer(scan_state.row_groups, state.row_groups);
 	while (true) {
 		idx_t vector_index;
@@ -369,11 +400,30 @@ bool RowGroupCollection::NextParallelScan(ClientContext &context, ParallelCollec
 		optional_ptr<RowGroupCollection> collection;
 		optional_ptr<SegmentNode<RowGroup>> row_group;
 		{
-			// select the next row group to scan from the parallel state
+			// select the next row group to scan from the parallel state. The source is pulled under the state lock, so
+			// it is never pulled concurrently, and the pull and the batch index allocation stay together
 			lock_guard<mutex> l(state.lock);
 			if (!state.current_row_group) {
-				// no more data left to scan
-				break;
+				// pull the next row group from the source (replaces walking the row groups directly), skipping any
+				// partitions that should not be scanned
+				while (true) {
+					auto result = state.NextRowGroup(context, interrupt_state);
+					if (result.type == AsyncResultType::BLOCKED) {
+						// the source parked the scan - the caller must suspend it (the source resumes it later)
+						return AsyncResultType::BLOCKED;
+					}
+					if (result.type == AsyncResultType::FINISHED) {
+						break;
+					}
+					if (state.ShouldScanPartition(*result.row_group)) {
+						state.current_row_group = result.row_group;
+						state.vector_index = 0;
+						break;
+					}
+				}
+				if (!state.current_row_group) {
+					break;
+				}
 			}
 			auto &current_row_group = state.current_row_group->GetNode();
 			if (current_row_group.count == 0) {
@@ -389,14 +439,14 @@ bool RowGroupCollection::NextParallelScan(ClientContext &context, ParallelCollec
 				D_ASSERT(vector_index * STANDARD_VECTOR_SIZE < current_row_group.count);
 				state.vector_index++;
 				if (state.vector_index * STANDARD_VECTOR_SIZE >= current_row_group.count) {
-					state.AssignRowGroup(state.GetNextRowGroup(*state.row_groups, *row_group).get());
+					state.current_row_group = nullptr;
 					state.vector_index = 0;
 				}
 			} else {
 				state.processed_rows += current_row_group.count;
 				vector_index = 0;
 				max_row = row_start + current_row_group.count;
-				state.AssignRowGroup(state.GetNextRowGroup(*state.row_groups, *row_group).get());
+				state.current_row_group = nullptr;
 			}
 			max_row = MinValue<idx_t>(max_row, state.max_row);
 			scan_state.batch_index = ++state.batch_index;
@@ -421,11 +471,11 @@ bool RowGroupCollection::NextParallelScan(ClientContext &context, ParallelCollec
 			// skip this row group
 			continue;
 		}
-		return true;
+		return AsyncResultType::HAVE_MORE_OUTPUT;
 	}
 	lock_guard<mutex> l(state.lock);
 	scan_state.batch_index = state.batch_index;
-	return false;
+	return AsyncResultType::FINISHED;
 }
 
 //===--------------------------------------------------------------------===//

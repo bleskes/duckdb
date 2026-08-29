@@ -9,6 +9,7 @@
 #pragma once
 
 #include "duckdb/common/enums/column_segment_info_scan_type.hpp"
+#include "duckdb/common/enums/operator_result_type.hpp"
 #include "duckdb/common/unique_ptr.hpp"
 #include "duckdb/storage/table/data_table_info.hpp"
 #include "duckdb/storage/table/persistent_table_data.hpp"
@@ -24,6 +25,7 @@ class ColumnDataCollection;
 class ColumnDefinition;
 class DataTable;
 class DataChunk;
+class InterruptState;
 class DistinctStatistics;
 class DuckTransaction;
 class Expression;
@@ -97,6 +99,14 @@ public:
 	idx_t MaxThreads(ClientContext &context) const;
 	void InitializeParallelScan(ClientContext &context, ParallelTableScanState &state,
 	                            const vector<ColumnIndex> &column_indexes);
+	//! Assign the next row group to scan to the given scan state. On HAVE_MORE_OUTPUT the row group is set on the scan
+	//! state; on BLOCKED the row group source parked the scan and the caller must suspend it (the source resumes it via
+	//! the interrupt_state it was handed)
+	AsyncResultType NextParallelScan(ClientContext &context, ParallelTableScanState &state, TableScanState &scan_state,
+	                                 optional_ptr<const InterruptState> interrupt_state);
+	//! Backwards-compatible overload for out-of-tree extensions that call the pre-existing 3-argument signature (e.g.
+	//! the spatial extension's rtree index scan). Returns the number of rows in the assigned row group (0 when
+	//! finished)
 	idx_t NextParallelScan(ClientContext &context, ParallelTableScanState &state, TableScanState &scan_state);
 
 	//! Scans up to STANDARD_VECTOR_SIZE elements from the table starting
